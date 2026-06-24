@@ -1,0 +1,363 @@
+"""
+=============================================================================
+CRYPTO SIGNAL + NEWS NOTIFIER v2.0
+=============================================================================
+Запускається через GitHub Actions кожні 30 хвилин.
+Надсилає в Telegram:
+  1. Технічні сигнали (RSI, MACD, обсяг, BB)
+  2. Великі рухи ціни (±2.5% за 1 годину)
+  3. Важливі новини (CryptoPanic hot/important)
+
+БЕЗ КОМП'ЮТЕРА: запускається на хмарі (GitHub Actions, безкоштовно)
+=============================================================================
+"""
+
+import ccxt
+import requests
+import pandas as pd
+import numpy as np
+import json
+import os
+import time
+from datetime import datetime, timezone
+
+# ══════════════════════════════════════════════════════════════
+# КОНФІГ — через GitHub Secrets (не хардкодь в коді!)
+# ══════════════════════════════════════════════════════════════
+TELEGRAM_TOKEN    = os.getenv("TELEGRAM_TOKEN", "YOUR_BOT_TOKEN")
+TELEGRAM_CHAT_ID  = os.getenv("TELEGRAM_CHAT_ID", "YOUR_CHAT_ID")
+CRYPTOPANIC_KEY   = os.getenv("CRYPTOPANIC_KEY", "")   # безкоштовно на cryptopanic.com
+
+SYMBOLS = ["ETH/USDT", "BTC/USDT", "SOL/USDT"]
+COINS_FOR_NEWS = ["ETH", "BTC", "SOL", "BNB"]   # для фільтрації новин
+
+# Пороги
+MIN_SIGNAL_STRENGTH = 3     # 1-10, рекомендую 3
+PRICE_MOVE_ALERT    = 2.5   # % за останню годину → сповіщення
+NEWS_HOURS_BACK     = 1.5   # шукати новини за останні N годин
+
+COOLDOWN_FILE = "/tmp/crypto_cooldown.json"
+COOLDOWN_MIN  = 120         # хвилин між однаковими сигналами
+
+
+# ══════════════════════════════════════════════════════════════
+# TELEGRAM
+# ══════════════════════════════════════════════════════════════
+def tg(msg: str, silent: bool = False) -> bool:
+    if "YOUR_BOT_TOKEN" in TELEGRAM_TOKEN:
+        print(f"[DEMO TG]\n{msg}\n")
+        return True
+    try:
+        r = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json={
+                "chat_id":              TELEGRAM_CHAT_ID,
+                "text":                 msg,
+                "parse_mode":           "HTML",
+                "disable_notification": silent,
+            }, timeout=10)
+        return r.status_code == 200
+    except Exception as e:
+        print(f"TG error: {e}"); return False
+
+
+# ══════════════════════════════════════════════════════════════
+# COOLDOWN
+# ══════════════════════════════════════════════════════════════
+def load_cd() -> dict:
+    try:
+        with open(COOLDOWN_FILE) as f: return json.load(f)
+    except Exception: return {}
+
+def save_cd(cd: dict):
+    try:
+        with open(COOLDOWN_FILE, "w") as f: json.dump(cd, f)
+    except Exception: pass
+
+def ok_to_send(key: str, cd: dict) -> bool:
+    last = cd.get(key, 0)
+    return (time.time() - last) / 60 >= COOLDOWN_MIN
+
+def mark_sent(key: str, cd: dict):
+    cd[key] = time.time()
+
+
+# ══════════════════════════════════════════════════════════════
+# ДАНІ
+# ══════════════════════════════════════════════════════════════
+def fetch_ohlcv(symbol: str, tf="1h", limit=100):
+    try:
+        ex = ccxt.binance({"options": {"defaultType": "future"},
+                           "enableRateLimit": True})
+        bars = ex.fetch_ohlcv(symbol, tf, limit=limit)
+        df = pd.DataFrame(bars, columns=["ts","open","high","low","close","vol"])
+        df["time"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
+        return df
+    except Exception as e:
+        print(f"  OHLCV {symbol}: {e}"); return pd.DataFrame()
+
+def fetch_fg() -> tuple[int, str]:
+    try:
+        r = requests.get("https://api.alternative.me/fng/?limit=1",
+                         timeout=8).json()
+        return int(r["data"][0]["value"]), r["data"][0]["value_classification"]
+    except Exception:
+        return 50, "Neutral"
+
+def fetch_news() -> list[dict]:
+    """Новини з CryptoPanic (hot + important)."""
+    results = []
+    try:
+        params = {
+            "public":     "true",
+            "filter":     "hot",
+            "currencies": ",".join(COINS_FOR_NEWS),
+        }
+        if CRYPTOPANIC_KEY:
+            params["auth_token"] = CRYPTOPANIC_KEY
+
+        r = requests.get("https://cryptopanic.com/api/v1/posts/",
+                         params=params, timeout=10)
+        if r.status_code != 200:
+            return []
+
+        from datetime import timedelta
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=NEWS_HOURS_BACK)
+        for item in r.json().get("results", [])[:20]:
+            try:
+                pub = datetime.fromisoformat(
+                    item["published_at"].replace("Z", "+00:00"))
+                if pub < cutoff:
+                    continue
+                votes = item.get("votes", {})
+                pos   = votes.get("positive", 0)
+                neg   = votes.get("negative", 0)
+                results.append({
+                    "title":  item.get("title", ""),
+                    "source": item.get("source", {}).get("title", ""),
+                    "url":    item.get("url", ""),
+                    "pos":    pos, "neg": neg,
+                    "score":  pos - neg,
+                    "pub":    pub.strftime("%H:%M"),
+                    "coins":  [c["code"] for c in item.get("currencies", [])],
+                })
+            except Exception:
+                continue
+    except Exception as e:
+        print(f"  News error: {e}")
+    return sorted(results, key=lambda x: x["score"], reverse=True)
+
+
+# ══════════════════════════════════════════════════════════════
+# ІНДИКАТОРИ
+# ══════════════════════════════════════════════════════════════
+def indicators(df: pd.DataFrame) -> dict:
+    c, v = df["close"], df["vol"]
+    # RSI
+    d = c.diff()
+    g = d.clip(lower=0).rolling(14).mean()
+    l = (-d.clip(upper=0)).rolling(14).mean()
+    rsi = float((100 - 100/(1 + g/l.replace(0, np.nan))).iloc[-1])
+    # MACD
+    e12 = c.ewm(span=12, adjust=False).mean()
+    e26 = c.ewm(span=26, adjust=False).mean()
+    mac = e12 - e26
+    sig = mac.ewm(span=9, adjust=False).mean()
+    macd_xu = float(mac.iloc[-2]) <= float(sig.iloc[-2]) and float(mac.iloc[-1]) > float(sig.iloc[-1])
+    macd_xd = float(mac.iloc[-2]) >= float(sig.iloc[-2]) and float(mac.iloc[-1]) < float(sig.iloc[-1])
+    # EMA
+    e7  = float(c.ewm(span=7,  adjust=False).mean().iloc[-1])
+    e25 = float(c.ewm(span=25, adjust=False).mean().iloc[-1])
+    e99 = float(c.ewm(span=99, adjust=False).mean().iloc[-1])
+    # Volume
+    vm  = float(v.rolling(20).mean().iloc[-1])
+    vs  = float(v.iloc[-1]) / vm if vm > 0 else 1.0
+    # BB
+    m20 = c.rolling(20).mean()
+    s20 = c.rolling(20).std()
+    bb_up = float((m20 + 2*s20).iloc[-1])
+    bb_lo = float((m20 - 2*s20).iloc[-1])
+    bb_pct = (float(c.iloc[-1]) - bb_lo) / (bb_up - bb_lo + 1e-10)
+    # Momentum
+    mom1h = (float(c.iloc[-1]) - float(c.iloc[-2])) / float(c.iloc[-2]) * 100
+    mom3h = (float(c.iloc[-1]) - float(c.iloc[-4])) / float(c.iloc[-4]) * 100 if len(c) > 4 else 0
+    return {
+        "price": float(c.iloc[-1]), "prev": float(c.iloc[-2]),
+        "rsi": rsi, "macd_xu": macd_xu, "macd_xd": macd_xd,
+        "e7": e7, "e25": e25, "e99": e99,
+        "vs": vs, "bb": bb_pct, "mom1h": mom1h, "mom3h": mom3h,
+    }
+
+
+# ══════════════════════════════════════════════════════════════
+# СИГНАЛИ
+# ══════════════════════════════════════════════════════════════
+def signals(ind: dict, fg: int) -> list[dict]:
+    p, rsi, vs, bb = ind["price"], ind["rsi"], ind["vs"], ind["bb"]
+    sigs = []
+
+    # Великий ціновий рух
+    if abs(ind["mom1h"]) >= PRICE_MOVE_ALERT:
+        dir_ = "🟢" if ind["mom1h"] > 0 else "🔴"
+        sigs.append({"type": "MOVE", "strength": 8 if abs(ind["mom1h"]) > 4 else 6,
+                     "text": f"{dir_} Різкий рух: {ind['mom1h']:+.1f}% за годину\n"
+                             f"Ціна: ${p:,.2f} | Обсяг ×{vs:.1f}"})
+
+    # Великий обсяг
+    if vs >= 2.8:
+        d = "↑" if ind["mom1h"] > 0 else "↓"
+        sigs.append({"type": "VOL", "strength": 7,
+                     "text": f"👀 Обсяг ×{vs:.1f} від середнього {d}\n"
+                             f"Великі гравці активні!"})
+
+    # RSI extreme + об'єм
+    if rsi < 28 and vs > 1.3:
+        sigs.append({"type": "LONG", "strength": 9,
+                     "text": f"🟢 RSI={rsi:.0f} — сильна перепроданість\n"
+                             f"+ підвищений обсяг ×{vs:.1f}"})
+    elif rsi < 35:
+        sigs.append({"type": "LONG", "strength": 5,
+                     "text": f"🟡 RSI={rsi:.0f} — перепроданість"})
+    elif rsi > 72 and vs > 1.3:
+        sigs.append({"type": "SHORT", "strength": 8,
+                     "text": f"🔴 RSI={rsi:.0f} — сильна перекупленість\n"
+                             f"+ обсяг ×{vs:.1f}"})
+    elif rsi > 68:
+        sigs.append({"type": "SHORT", "strength": 5,
+                     "text": f"🟠 RSI={rsi:.0f} — перекупленість"})
+
+    # MACD cross
+    if ind["macd_xu"] and p > ind["e7"]:
+        sigs.append({"type": "LONG", "strength": 7,
+                     "text": f"📈 MACD Golden Cross + ціна вище EMA7"})
+    if ind["macd_xd"] and p < ind["e7"]:
+        sigs.append({"type": "SHORT", "strength": 6,
+                     "text": f"📉 MACD Death Cross + ціна нижче EMA7"})
+
+    # EMA25 пробій
+    if ind["prev"] < ind["e25"] and p > ind["e25"] and vs > 1.2:
+        sigs.append({"type": "LONG", "strength": 7,
+                     "text": f"🚀 Пробій EMA25 вгору! (${ind['e25']:.0f})\n"
+                             f"Обсяг ×{vs:.1f}"})
+    if ind["prev"] > ind["e25"] and p < ind["e25"] and vs > 1.2:
+        sigs.append({"type": "SHORT", "strength": 7,
+                     "text": f"💔 Пробій EMA25 вниз (${ind['e25']:.0f})\n"
+                             f"Обсяг ×{vs:.1f}"})
+
+    # F&G extreme
+    if fg < 20 and rsi < 35:
+        sigs.append({"type": "LONG", "strength": 10,
+                     "text": f"🔥 F&G={fg} (Extreme Fear) + RSI={rsi:.0f}\n"
+                             f"Найсильніший contrarian сигнал!"})
+    if fg > 82 and bb > 0.92:
+        sigs.append({"type": "SHORT", "strength": 9,
+                     "text": f"⚠️ F&G={fg} (Extreme Greed) + ціна у верхній BB\n"
+                             f"Небезпечна ейфорія"})
+
+    # Нижня межа BB
+    if bb < 0.12 and rsi < 40:
+        sigs.append({"type": "LONG", "strength": 6,
+                     "text": f"🎯 Ціна біля нижньої BB + RSI={rsi:.0f}"})
+
+    return sigs
+
+
+# ══════════════════════════════════════════════════════════════
+# ФОРМАТУВАННЯ ПОВІДОМЛЕНЬ
+# ══════════════════════════════════════════════════════════════
+def fmt_signal(symbol: str, ind: dict, fg: int, fg_cls: str,
+               sig: dict) -> str:
+    coin = symbol.split("/")[0]
+    t    = datetime.now().strftime("%H:%M")
+    e = {"LONG":"🟢","SHORT":"🔴","MOVE":"⚡","VOL":"👀"}.get(sig["type"],"📊")
+    return (
+        f"{e} <b>{coin}/USDT — {sig['type']} ({t})</b>\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"{sig['text']}\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"💰 Ціна: <b>${ind['price']:,.2f}</b> ({ind['mom1h']:+.1f}%/1h)\n"
+        f"📊 RSI={ind['rsi']:.0f} | F&G={fg} {fg_cls[:4]}\n"
+        f"📉 EMA7=${ind['e7']:.0f} | EMA25=${ind['e25']:.0f}\n"
+        f"📦 Обсяг ×{ind['vs']:.1f}\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"⚡ <b>Зайди глянь!</b>"
+    )
+
+def fmt_news(news: list[dict], fg: int, fg_cls: str) -> str | None:
+    if not news:
+        return None
+    t = datetime.now().strftime("%H:%M")
+    lines = [f"📰 <b>КРИПТО НОВИНИ ({t})</b>",
+             f"F&G: {fg} ({fg_cls})",
+             "━━━━━━━━━━━━━━━━"]
+    for n in news[:4]:
+        coins = " ".join(f"#{c}" for c in n["coins"][:3])
+        sent  = "🟢" if n["score"] > 0 else "🔴" if n["score"] < 0 else "⚪"
+        lines.append(f"{sent} [{n['pub']}] <b>{n['source']}</b>")
+        lines.append(f"   {n['title'][:80]}")
+        if coins:
+            lines.append(f"   {coins}")
+        lines.append("")
+    lines.append("📱 Більше: cryptopanic.com")
+    return "\n".join(lines)
+
+
+# ══════════════════════════════════════════════════════════════
+# ГОЛОВНА ФУНКЦІЯ
+# ══════════════════════════════════════════════════════════════
+def main():
+    print(f"\n{'='*52}")
+    print(f"  Crypto Notifier v2.0 | {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print(f"{'='*52}")
+
+    cd   = load_cd()
+    fg, fg_cls = fetch_fg()
+    print(f"  F&G: {fg} ({fg_cls})")
+
+    sent = 0
+
+    # ── 1. Технічні сигнали ─────────────────────────────────
+    for sym in SYMBOLS:
+        print(f"\n  {sym}...", end=" ")
+        df = fetch_ohlcv(sym, "1h", 100)
+        if df.empty:
+            print("! немає даних"); continue
+
+        ind  = indicators(df)
+        sigs = [s for s in signals(ind, fg) if s["strength"] >= MIN_SIGNAL_STRENGTH]
+
+        if not sigs:
+            print(f"сигналів немає (RSI={ind['rsi']:.0f} mov={ind['mom1h']:+.1f}%)")
+            continue
+
+        best = max(sigs, key=lambda x: x["strength"])
+        key  = f"{sym}_{best['type']}"
+        print(f"СИГНАЛ {best['type']} сила={best['strength']}")
+
+        if not ok_to_send(key, cd):
+            print(f"  → cooldown активний"); continue
+
+        msg = fmt_signal(sym, ind, fg, fg_cls, best)
+        if tg(msg):
+            mark_sent(key, cd); sent += 1
+        time.sleep(0.3)
+
+    # ── 2. Новини ────────────────────────────────────────────
+    print(f"\n  Новини...", end=" ")
+    news = fetch_news()
+    print(f"{len(news)} за {NEWS_HOURS_BACK}год")
+
+    if news:
+        news_key = f"news_{datetime.now().strftime('%Y%m%d_%H')}"
+        if ok_to_send(news_key, cd):
+            msg = fmt_news(news, fg, fg_cls)
+            if msg and tg(msg, silent=True):  # silent = без звуку
+                mark_sent(news_key, cd); sent += 1
+
+    save_cd(cd)
+    print(f"\n  Надіслано: {sent} повідомлень")
+    print("="*52)
+
+
+if __name__ == "__main__":
+    main()
