@@ -36,7 +36,7 @@ MIN_SIGNAL_STRENGTH = 3     # 1-10, рекомендую 3
 PRICE_MOVE_ALERT    = 2.5   # % за останню годину → сповіщення
 NEWS_HOURS_BACK     = 1.5   # шукати новини за останні N годин
 
-COOLDOWN_FILE = "/tmp/crypto_cooldown.json"
+COOLDOWN_FILE = os.getenv("COOLDOWN_FILE", "crypto_cooldown.json")
 COOLDOWN_MIN  = 120         # хвилин між однаковими сигналами
 
 
@@ -276,7 +276,7 @@ def fmt_signal(symbol: str, ind: dict, fg: int, fg_cls: str,
         f"{sig['text']}\n"
         f"━━━━━━━━━━━━━━━━\n"
         f"💰 Ціна: <b>${ind['price']:,.2f}</b> ({ind['mom1h']:+.1f}%/1h)\n"
-        f"📊 RSI={ind['rsi']:.0f} | F&G={fg} {fg_cls[:4]}\n"
+        f"📊 RSI={ind['rsi']:.0f} | F&G={fg} {fg_cls}\n"
         f"📉 EMA7=${ind['e7']:.0f} | EMA25=${ind['e25']:.0f}\n"
         f"📦 Обсяг ×{ind['vs']:.1f}\n"
         f"━━━━━━━━━━━━━━━━\n"
