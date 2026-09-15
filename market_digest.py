@@ -1,27 +1,26 @@
 """
 =============================================================================
-DAILY DIGEST — щоденний дайджест о 10:00 (Київ)
+MARKET DIGEST — погодинний дайджест ринку
 =============================================================================
-Раз на день надсилає в Telegram:
+Щогодини надсилає в Telegram (тихо, без звуку — це інформаційний огляд,
+не терміновий алерт):
   1. Стан ринку (F&G, RSI/тренд/обсяг по ETH/BTC/SOL)
-  2. Що може вплинути сьогодні (новини, Binance анонси, макрокалендар)
-  3. Потенційно вигідні сетапи (сканування сигналів по трекованих монетах,
+  2. Потенційно вигідні сетапи (сканування сигналів по трекованих монетах,
      НЕ реальні відкриті позиції — бот не має доступу до акаунта)
-
-Запускається через GitHub Actions двічі на день (крони під літній і
-зимовий UTC-зсув Києва), але реально працює лише раз — перевіряє
-поточний київський час і виходить, якщо зараз не година дайджесту.
+  3. Що нового за останню годину (новини, Binance анонси) + майбутні
+     макроподії на найближчі години
 =============================================================================
 """
 
-import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import signal_notifier_v2 as sn
 
 KYIV = ZoneInfo("Europe/Kyiv")
-DIGEST_HOUR = 10   # київська година, о якій надсилаємо дайджест
+
+FRESH_HOURS = 1     # вікно "що нового" — під інтервал запуску (раз/год)
+ECON_LOOKAHEAD_HOURS = 6   # на скільки годин вперед показувати макроподії
 
 
 def market_state(fg: int, fg_cls: str) -> str:
@@ -68,22 +67,18 @@ def opportunities(fg: int) -> str:
     return "\n".join(lines)
 
 
-def todays_news() -> str | None:
-    news = sn.fetch_news(hours_back=24)
-    ann  = sn.fetch_binance_announcements(hours_back=24)
-
-    now_kyiv  = datetime.now(KYIV)
-    eod_kyiv  = now_kyiv.replace(hour=23, minute=59, second=59, microsecond=0)
-    hours_left = max(1.0, (eod_kyiv - now_kyiv).total_seconds() / 3600)
-    econ = sn.fetch_econ_calendar(hours_ahead=hours_left)
+def whats_new() -> str | None:
+    news = sn.fetch_news(hours_back=FRESH_HOURS)
+    ann  = sn.fetch_binance_announcements(hours_back=FRESH_HOURS)
+    econ = sn.fetch_econ_calendar(hours_ahead=ECON_LOOKAHEAD_HOURS)
 
     if not (news or ann or econ):
         return None
 
-    lines = ["📰 <b>ЩО МОЖЕ ВПЛИНУТИ СЬОГОДНІ</b>", "━━━━━━━━━━━━━━━━"]
+    lines = ["📰 <b>ЩО НОВОГО</b>", "━━━━━━━━━━━━━━━━"]
 
     if econ:
-        lines.append("📅 <b>Макроподії:</b>")
+        lines.append(f"📅 <b>Макроподії (наступні {ECON_LOOKAHEAD_HOURS}год):</b>")
         for e in econ[:5]:
             lines.append(f"  🕐 {e['when']} {e['country']} — {e['event']}")
         lines.append("")
@@ -95,7 +90,7 @@ def todays_news() -> str | None:
         lines.append("")
 
     if news:
-        lines.append("📰 <b>Топ новини:</b>")
+        lines.append("📰 <b>Новини:</b>")
         for n in news[:4]:
             sent = "🟢" if n["score"] > 0 else "🔴" if n["score"] < 0 else "⚪"
             lines.append(f"  {sent} [{n['pub']}] {n['title'][:70]}")
@@ -105,29 +100,23 @@ def todays_news() -> str | None:
 
 def main():
     now_kyiv = datetime.now(KYIV)
-    force    = os.getenv("FORCE_DIGEST", "").lower() == "true"
-    print(f"Kyiv now: {now_kyiv.strftime('%Y-%m-%d %H:%M %Z')}")
-    if now_kyiv.hour != DIGEST_HOUR and not force:
-        print(f"  → не час дайджесту (чекаємо {DIGEST_HOUR}:00), виходжу")
-        return
-
-    print(f"\n{'='*52}\n  DAILY DIGEST | {now_kyiv.strftime('%Y-%m-%d %H:%M')}\n{'='*52}")
+    print(f"\n{'='*52}\n  MARKET DIGEST | {now_kyiv.strftime('%Y-%m-%d %H:%M %Z')}\n{'='*52}")
 
     fg, fg_cls = sn.fetch_fg()
     print(f"  F&G: {fg} ({fg_cls})")
 
     parts = [
-        f"☀️ <b>ЩОДЕННИЙ ДАЙДЖЕСТ ({now_kyiv.strftime('%d.%m %H:%M')})</b>",
+        f"🕐 <b>ДАЙДЖЕСТ РИНКУ ({now_kyiv.strftime('%d.%m %H:%M')})</b>",
         market_state(fg, fg_cls),
         opportunities(fg),
     ]
-    news_block = todays_news()
+    news_block = whats_new()
     if news_block:
         parts.append(news_block)
 
     msg = "\n\n".join(parts)
     print(f"  Довжина повідомлення: {len(msg)} символів")
-    ok = sn.tg(msg)
+    ok = sn.tg(msg, silent=True)
     print(f"  Надіслано: {'так' if ok else 'ні'}")
 
 

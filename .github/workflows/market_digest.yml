@@ -1,17 +1,10 @@
-name: Daily Digest
+name: Market Digest
 
 on:
   schedule:
-    # 10:00 Київ = 07:00 UTC (літній час, EEST, UTC+3)
-    - cron: '0 7 * * *'
-    # 10:00 Київ = 08:00 UTC (зимовий час, EET, UTC+2)
-    - cron: '0 8 * * *'
+    # Щогодини, о 15-й хвилині (щоб не збігатись з іншими крон-джобами о :00/:30)
+    - cron: '15 * * * *'
   workflow_dispatch:  # ручний запуск для тесту
-    inputs:
-      force:
-        description: 'Надіслати негайно, ігноруючи перевірку київського часу'
-        type: boolean
-        default: true
 
 jobs:
   digest:
@@ -31,10 +24,9 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run daily digest
+      - name: Run market digest
         env:
           TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           CRYPTOPANIC_KEY:  ${{ secrets.CRYPTOPANIC_KEY }}
-          FORCE_DIGEST:     ${{ github.event_name == 'workflow_dispatch' && inputs.force }}
-        run: python daily_digest.py
+        run: python market_digest.py
