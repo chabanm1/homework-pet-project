@@ -30,7 +30,7 @@ TELEGRAM_TOKEN    = os.getenv("TELEGRAM_TOKEN", "YOUR_BOT_TOKEN")
 TELEGRAM_CHAT_ID  = os.getenv("TELEGRAM_CHAT_ID", "YOUR_CHAT_ID")
 CRYPTOPANIC_KEY   = os.getenv("CRYPTOPANIC_KEY", "")   # безкоштовно на cryptopanic.com
 
-SYMBOLS = ["ETH/USDT:USDT", "BTC/USDT:USDT", "SOL/USDT:USDT"]  # Bybit perpetual swap
+SYMBOLS = ["ETH/USDT", "BTC/USDT", "SOL/USDT"]  # Kraken spot
 COINS_FOR_NEWS = ["ETH", "BTC", "SOL", "BNB"]   # для фільтрації новин
 
 # Пороги
@@ -155,9 +155,12 @@ def signal_stats(cd: dict, days: float = 7) -> dict:
 # ДАНІ
 # ══════════════════════════════════════════════════════════════
 def _exchange():
-    # Binance геоблокує весь свій API (навіть публічні ендпоінти) з дата-центрів
-    # GitHub Actions (HTTP 451) — Bybit публічні ринкові дані звідти доступні.
-    return ccxt.bybit({"options": {"defaultType": "swap"}, "enableRateLimit": True})
+    # Binance (HTTP 451) і Bybit (CloudFront geo-block) обидва недоступні з
+    # дата-центрів GitHub Actions. Kraken — US-ліцензована біржа, звідти доступна.
+    return ccxt.kraken({"enableRateLimit": True})
+
+def _futures_exchange():
+    return ccxt.krakenfutures({"enableRateLimit": True})
 
 def fetch_ohlcv(symbol: str, tf="1h", limit=100):
     try:
@@ -170,9 +173,11 @@ def fetch_ohlcv(symbol: str, tf="1h", limit=100):
         print(f"  OHLCV {symbol}: {e}"); return pd.DataFrame()
 
 def fetch_funding(symbol: str) -> float | None:
-    """Funding rate ф'ючерса (частка за 8-годинний період, напр. 0.0005 = 0.05%)."""
+    """Funding rate безстрокового ф'ючерса (частка за 8-годинний період,
+    напр. 0.0005 = 0.05%). Kraken Futures котирує в USD, не USDT."""
     try:
-        return _exchange().fetch_funding_rate(symbol).get("fundingRate")
+        base = symbol.split("/")[0]
+        return _futures_exchange().fetch_funding_rate(f"{base}/USD:USD").get("fundingRate")
     except Exception as e:
         print(f"  Funding {symbol}: {e}"); return None
 
