@@ -22,6 +22,7 @@ import json
 import os
 import time
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 
 # ══════════════════════════════════════════════════════════════
 # КОНФІГ — через GitHub Secrets (не хардкодь в коді!)
@@ -133,14 +134,14 @@ def mark_seen(key: str, cd: dict):
 # ══════════════════════════════════════════════════════════════
 # ТРЕКІНГ ЕФЕКТИВНОСТІ СИГНАЛІВ
 # ══════════════════════════════════════════════════════════════
-def track_signal(sym: str, sig_type: str, price: float, cd: dict):
+def track_signal(sym: str, sig_type: str, price: float, cd: dict, rule: str = "OTHER"):
     """Запам'ятовує LONG/SHORT сигнал, щоб через TRACK_HOURS перевірити,
     чи ціна реально пішла в передбачений бік."""
     if sig_type not in ("LONG", "SHORT"):
         return   # MOVE/VOL не є направленою ставкою — нема що звіряти
     track = cd.setdefault("_track", [])
     track.append({
-        "sym": sym, "type": sig_type, "price0": price,
+        "sym": sym, "type": sig_type, "rule": rule, "price0": price,
         "ts": time.time(), "check_at": time.time() + TRACK_HOURS * 3600,
         "resolved": False,
     })
@@ -175,6 +176,29 @@ def signal_stats(cd: dict, days: float = 7) -> dict:
         "win_rate": (wins / decided * 100) if decided else None,
         "avg_pct": (sum(r["pct"] for r in recs) / len(recs)) if recs else None,
     }
+
+def signal_stats_by_rule(cd: dict, days: float = 1, min_n: int = 3) -> list[dict]:
+    """Win-rate окремо по кожному типу правила (RSI_EXTREME, EMA25_BREAK, ...).
+    min_n відсікає типи з надто малою вибіркою, щоб не показувати випадковий
+    100%/0% на 1-2 записах як "закономірність"."""
+    cutoff = time.time() - days * 86400
+    recs = [r for r in cd.get("_track", []) if r.get("resolved") and r["ts"] >= cutoff]
+    by_rule: dict[str, list[dict]] = {}
+    for r in recs:
+        by_rule.setdefault(r.get("rule", "OTHER"), []).append(r)
+
+    out = []
+    for rule, rs in by_rule.items():
+        wins  = sum(1 for r in rs if r["outcome"] == "win")
+        losses = sum(1 for r in rs if r["outcome"] == "loss")
+        decided = wins + losses
+        out.append({
+            "rule": rule, "total": len(rs), "wins": wins, "losses": losses,
+            "flats": len(rs) - decided,
+            "win_rate": (wins / decided * 100) if decided >= min_n else None,
+        })
+    out.sort(key=lambda x: (x["win_rate"] is None, -(x["win_rate"] or 0)))
+    return out
 
 
 # ══════════════════════════════════════════════════════════════
@@ -300,6 +324,39 @@ def fetch_binance_announcements(hours_back: float = ANNOUNCE_HOURS_BACK) -> list
 
 
 ECON_CURRENCIES = ("USD", "EUR")   # найбільше впливають на крипторинок
+KYIV = ZoneInfo("Europe/Kyiv")
+
+# (ключові слова в назві події, регістр не важливий) -> коротке пояснення
+# від чого залежить напрямок руху. Перевіряються по порядку, перший збіг виграє.
+ECON_EXPLANATIONS = [
+    (("cpi", "pce", "inflation"),
+     "Вище прогнозу → інфляція гаряча → ринок чекає жорсткішого Fed → крипта/ризик вниз. Нижче прогнозу → навпаки, вгору."),
+    (("federal funds rate", "rate decision", "interest rate"),
+     "Зниження ставки / м'якший тон → бичачо для крипти. Підвищення / яструбиний тон → ведмежо."),
+    (("fomc",),
+     "Рух залежить не від цифр, а від тону (hawkish/dovish) заяви чи прес-конференції Пауелла."),
+    (("non-farm", "nfp", "employment change"),
+     "Сильні дані по зайнятості → Fed може не поспішати зі зниженням ставки → тиск на крипту. Слабкі → навпаки."),
+    (("unemployment rate",),
+     "Вище прогнозу (гірший ринок праці) → очікування пом'якшення Fed → зазвичай бичачо для крипти."),
+    (("ppi",),
+     "Схоже на CPI, але про інфляцію на рівні виробників — сигнал слабший, та напрямок той самий."),
+    (("retail sales",),
+     "Сильні продажі → економіка гаряча → менше шансів на пом'якшення Fed → тиск на крипту."),
+    (("gdp",),
+     "Значно вище прогнозу → менше приводів для Fed пом'якшувати політику → тиск на ризикові активи."),
+    (("pmi",),
+     "Вище 50 і вище прогнозу → економіка розширюється → сильніший USD → часто тиск на крипту."),
+    (("powell", "speaks", "press conference"),
+     "Рух залежить від тону виступу (hawkish/dovish), а не від конкретної цифри."),
+]
+
+def econ_explain(title: str) -> str:
+    t = title.lower()
+    for keywords, note in ECON_EXPLANATIONS:
+        if any(k in t for k in keywords):
+            return note
+    return "Сильне відхилення факту від прогнозу (в будь-який бік) зазвичай підсилює волатильність."
 
 def fetch_econ_calendar(hours_ahead: float = ECON_HOURS_AHEAD) -> list[dict]:
     """High-impact макроподії (CPI, FOMC, NFP тощо) на найближчі
@@ -324,19 +381,25 @@ def fetch_econ_calendar(hours_ahead: float = ECON_HOURS_AHEAD) -> list[dict]:
                 when = datetime.fromisoformat(ev["date"]).astimezone(timezone.utc)
                 if not (now <= when <= until):
                     continue
+                title = ev.get("title", "")
+                hrs_left = (when - now).total_seconds() / 3600
+                in_str = f"{int(hrs_left)}г {int((hrs_left % 1) * 60)}хв" if hrs_left >= 1 else f"{int(hrs_left * 60)}хв"
                 results.append({
-                    "id":       f"econ_{ev.get('title')}_{ev['date']}",
-                    "event":    ev.get("title", ""),
+                    "id":       f"econ_{title}_{ev['date']}",
+                    "event":    title,
                     "country":  ev.get("country", ""),
-                    "when":     when.strftime("%d.%m %H:%M"),
+                    "when":     when.astimezone(KYIV).strftime("%d.%m %H:%M") + " Київ",
+                    "in":       in_str,
                     "forecast": ev.get("forecast") or None,
                     "prev":     ev.get("previous") or None,
+                    "explain":  econ_explain(title),
+                    "_ts":      when.timestamp(),
                 })
             except Exception:
                 continue
     except Exception as e:
         print(f"  Econ calendar error: {e}")
-    return sorted(results, key=lambda x: x["when"])
+    return sorted(results, key=lambda x: x["_ts"])
 
 
 # ══════════════════════════════════════════════════════════════
@@ -395,74 +458,74 @@ def signals(ind: dict, fg: int, funding: float | None = None) -> list[dict]:
     # Великий ціновий рух
     if abs(ind["mom1h"]) >= PRICE_MOVE_ALERT:
         dir_ = "🟢" if ind["mom1h"] > 0 else "🔴"
-        sigs.append({"type": "MOVE", "strength": 8 if abs(ind["mom1h"]) > 4 else 6,
+        sigs.append({"type": "MOVE", "rule": "MOVE", "strength": 8 if abs(ind["mom1h"]) > 4 else 6,
                      "text": f"{dir_} Різкий рух: {ind['mom1h']:+.1f}% за годину\n"
                              f"Ціна: ${fmt_price(p)} | Обсяг ×{vs:.1f}"})
 
     # Великий обсяг
     if vs >= 2.8:
         d = "↑" if ind["mom1h"] > 0 else "↓"
-        sigs.append({"type": "VOL", "strength": 7,
+        sigs.append({"type": "VOL", "rule": "VOL", "strength": 7,
                      "text": f"👀 Обсяг ×{vs:.1f} від середнього {d}\n"
                              f"Великі гравці активні!"})
 
     # RSI extreme + об'єм
     if rsi < 28 and vs > 1.3:
-        sigs.append({"type": "LONG", "strength": 9,
+        sigs.append({"type": "LONG", "rule": "RSI_EXTREME", "strength": 9,
                      "text": f"🟢 RSI={rsi:.0f} — сильна перепроданість\n"
                              f"+ підвищений обсяг ×{vs:.1f}"})
     elif rsi < 35:
-        sigs.append({"type": "LONG", "strength": 5,
+        sigs.append({"type": "LONG", "rule": "RSI_MILD", "strength": 5,
                      "text": f"🟡 RSI={rsi:.0f} — перепроданість"})
     elif rsi > 72 and vs > 1.3:
-        sigs.append({"type": "SHORT", "strength": 8,
+        sigs.append({"type": "SHORT", "rule": "RSI_EXTREME", "strength": 8,
                      "text": f"🔴 RSI={rsi:.0f} — сильна перекупленість\n"
                              f"+ обсяг ×{vs:.1f}"})
     elif rsi > 68:
-        sigs.append({"type": "SHORT", "strength": 5,
+        sigs.append({"type": "SHORT", "rule": "RSI_MILD", "strength": 5,
                      "text": f"🟠 RSI={rsi:.0f} — перекупленість"})
 
     # MACD cross
     if ind["macd_xu"] and p > ind["e7"]:
-        sigs.append({"type": "LONG", "strength": 7,
+        sigs.append({"type": "LONG", "rule": "MACD_CROSS", "strength": 7,
                      "text": f"📈 MACD Golden Cross + ціна вище EMA7"})
     if ind["macd_xd"] and p < ind["e7"]:
-        sigs.append({"type": "SHORT", "strength": 6,
+        sigs.append({"type": "SHORT", "rule": "MACD_CROSS", "strength": 6,
                      "text": f"📉 MACD Death Cross + ціна нижче EMA7"})
 
     # EMA25 пробій
     if ind["prev"] < ind["e25"] and p > ind["e25"] and vs > 1.2:
-        sigs.append({"type": "LONG", "strength": 7,
+        sigs.append({"type": "LONG", "rule": "EMA25_BREAK", "strength": 7,
                      "text": f"🚀 Пробій EMA25 вгору! (${fmt_price(ind['e25'])})\n"
                              f"Обсяг ×{vs:.1f}"})
     if ind["prev"] > ind["e25"] and p < ind["e25"] and vs > 1.2:
-        sigs.append({"type": "SHORT", "strength": 7,
+        sigs.append({"type": "SHORT", "rule": "EMA25_BREAK", "strength": 7,
                      "text": f"💔 Пробій EMA25 вниз (${fmt_price(ind['e25'])})\n"
                              f"Обсяг ×{vs:.1f}"})
 
     # F&G extreme
     if fg < 20 and rsi < 35:
-        sigs.append({"type": "LONG", "strength": 10,
+        sigs.append({"type": "LONG", "rule": "FG_EXTREME", "strength": 10,
                      "text": f"🔥 F&G={fg} (Extreme Fear) + RSI={rsi:.0f}\n"
                              f"Найсильніший contrarian сигнал!"})
     if fg > 82 and bb > 0.92:
-        sigs.append({"type": "SHORT", "strength": 9,
+        sigs.append({"type": "SHORT", "rule": "FG_EXTREME", "strength": 9,
                      "text": f"⚠️ F&G={fg} (Extreme Greed) + ціна у верхній BB\n"
                              f"Небезпечна ейфорія"})
 
     # Нижня межа BB
     if bb < 0.12 and rsi < 40:
-        sigs.append({"type": "LONG", "strength": 6,
+        sigs.append({"type": "LONG", "rule": "BB_LOWER", "strength": 6,
                      "text": f"🎯 Ціна біля нижньої BB + RSI={rsi:.0f}"})
 
     # Екстремальний funding rate (ф'ючерси) — перегріта одна сторона ринку
     if funding is not None:
         if funding >= FUNDING_EXTREME:
-            sigs.append({"type": "SHORT", "strength": 6,
+            sigs.append({"type": "SHORT", "rule": "FUNDING_EXTREME", "strength": 6,
                          "text": f"💸 Funding={funding*100:.3f}%/8г — лонги переплачують\n"
                                  f"Перегрів, ризик long squeeze"})
         elif funding <= -FUNDING_EXTREME:
-            sigs.append({"type": "LONG", "strength": 6,
+            sigs.append({"type": "LONG", "rule": "FUNDING_EXTREME", "strength": 6,
                          "text": f"💰 Funding={funding*100:.3f}%/8г — шорти переплачують\n"
                                  f"Перегрів у шортах, contrarian LONG"})
 
@@ -525,7 +588,7 @@ def nearby_econ_note(econ: list[dict], hours: float = 8) -> str:
     if not econ:
         return ""
     soon = econ[:2]   # econ вже відсортований за часом
-    lines = ["\n📅 <b>Скоро:</b>"] + [f"  🕐 {e['when']} {e['country']} — {e['event']}" for e in soon]
+    lines = ["\n📅 <b>Скоро:</b>"] + [f"  🕐 {e['when']} (через {e['in']}) {e['country']} — {e['event']}" for e in soon]
     return "\n".join(lines)
 
 def fmt_signal(symbol: str, ind: dict, fg: int, fg_cls: str,
@@ -578,12 +641,13 @@ def fmt_econ(e: dict) -> str:
     ev = (
         f"📅 <b>Макроподія: {e['event']} ({e['country']})</b>\n"
         f"━━━━━━━━━━━━━━━━\n"
-        f"🕐 {e['when']} UTC"
+        f"🕐 {e['when']} (через {e['in']})"
     )
     if e.get("forecast") is not None:
         ev += f"\n📊 Прогноз: {e['forecast']}"
     if e.get("prev") is not None:
         ev += f" | Попередній: {e['prev']}"
+    ev += f"\n💡 {e['explain']}"
     return ev
 
 
@@ -635,7 +699,7 @@ def main():
         msg = fmt_signal(sym, ind, fg, fg_cls, best, econ)
         if tg(msg):
             mark_sent(key, cd)
-            track_signal(sym, best["type"], ind["price"], cd)
+            track_signal(sym, best["type"], ind["price"], cd, best.get("rule", "OTHER"))
             sent += 1
         time.sleep(0.3)
 

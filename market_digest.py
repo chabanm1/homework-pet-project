@@ -109,8 +109,9 @@ def whats_new() -> str | None:
 
     if econ:
         lines.append(f"📅 <b>Макроподії (наступні {ECON_LOOKAHEAD_HOURS}год):</b>")
-        for e in econ[:5]:
-            lines.append(f"  🕐 {e['when']} {e['country']} — {e['event']}")
+        for e in econ[:3]:
+            lines.append(f"  🕐 {e['when']} (через {e['in']}) {e['country']} — {e['event']}")
+            lines.append(f"     💡 {e['explain']}")
         lines.append("")
 
     if ann:
@@ -128,6 +129,13 @@ def whats_new() -> str | None:
     return "\n".join(lines)
 
 
+RULE_NAMES = {
+    "RSI_EXTREME": "RSI екстремум", "RSI_MILD": "RSI помірний",
+    "MACD_CROSS": "MACD cross", "EMA25_BREAK": "Пробій EMA25",
+    "FG_EXTREME": "F&G екстремум", "BB_LOWER": "Нижня BB",
+    "FUNDING_EXTREME": "Funding екстремум", "OTHER": "Інше",
+}
+
 def performance() -> str | None:
     cd = sn.load_cd()
     stats = sn.signal_stats(cd, days=7)
@@ -140,6 +148,17 @@ def performance() -> str | None:
         lines.append(f"{stats['flats']} flat, ще недостатньо вирішених сигналів")
     if stats["avg_pct"] is not None:
         lines.append(f"Середній рух: {stats['avg_pct']:+.2f}%")
+
+    today = sn.signal_stats_by_rule(cd, days=1)
+    if today:
+        lines.append("")
+        lines.append("📊 <b>За сьогодні, по типу сигналу:</b>")
+        for r in today:
+            name = RULE_NAMES.get(r["rule"], r["rule"])
+            if r["win_rate"] is not None:
+                lines.append(f"  {name}: {r['win_rate']:.0f}% ({r['wins']}W/{r['losses']}L)")
+            else:
+                lines.append(f"  {name}: {r['total']} сигн. — замало для % (мін. 3 вирішених)")
     return "\n".join(lines)
 
 
