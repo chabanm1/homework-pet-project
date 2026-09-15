@@ -7,6 +7,8 @@ CRYPTO SIGNAL + NEWS NOTIFIER v2.0
   1. Технічні сигнали (RSI, MACD, обсяг, BB)
   2. Великі рухи ціни (±2.5% за 1 годину)
   3. Важливі новини (CryptoPanic hot/important)
+  4. Лістинги/делістинги на Binance (офіційні анонси)
+  5. Макроподії (CPI, FOMC, NFP тощо — ForexFactory economic calendar)
 
 БЕЗ КОМП'ЮТЕРА: запускається на хмарі (GitHub Actions, безкоштовно)
 =============================================================================
@@ -19,7 +21,7 @@ import numpy as np
 import json
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 # ══════════════════════════════════════════════════════════════
 # КОНФІГ — через GitHub Secrets (не хардкодь в коді!)
@@ -35,9 +37,12 @@ COINS_FOR_NEWS = ["ETH", "BTC", "SOL", "BNB"]   # для фільтрації н
 MIN_SIGNAL_STRENGTH = 3     # 1-10, рекомендую 3
 PRICE_MOVE_ALERT    = 2.5   # % за останню годину → сповіщення
 NEWS_HOURS_BACK     = 1.5   # шукати новини за останні N годин
+ANNOUNCE_HOURS_BACK = 24    # шукати анонси Binance за останні N годин
+ECON_HOURS_AHEAD    = 24    # шукати макроподії на найближчі N годин
 
 COOLDOWN_FILE = os.getenv("COOLDOWN_FILE", "crypto_cooldown.json")
 COOLDOWN_MIN  = 120         # хвилин між однаковими сигналами
+SEEN_CAP      = 500         # скільки id одноразових подій пам'ятаємо
 
 
 # ══════════════════════════════════════════════════════════════
@@ -81,6 +86,16 @@ def ok_to_send(key: str, cd: dict) -> bool:
 def mark_sent(key: str, cd: dict):
     cd[key] = time.time()
 
+def already_seen(key: str, cd: dict) -> bool:
+    """Для одноразових подій (лістинг/делістинг/макроподія) — без TTL,
+    бо звичайний cooldown відпустив би й почав дублювати той самий анонс."""
+    return key in cd.get("_seen", [])
+
+def mark_seen(key: str, cd: dict):
+    seen = cd.setdefault("_seen", [])
+    seen.append(key)
+    del seen[:-SEEN_CAP]
+
 
 # ══════════════════════════════════════════════════════════════
 # ДАНІ
@@ -121,7 +136,6 @@ def fetch_news() -> list[dict]:
         if r.status_code != 200:
             return []
 
-        from datetime import timedelta
         cutoff = datetime.now(timezone.utc) - timedelta(hours=NEWS_HOURS_BACK)
         for item in r.json().get("results", [])[:20]:
             try:
@@ -146,6 +160,87 @@ def fetch_news() -> list[dict]:
     except Exception as e:
         print(f"  News error: {e}")
     return sorted(results, key=lambda x: x["score"], reverse=True)
+
+
+# Binance CMS catalog IDs (публічні, без ключа)
+BINANCE_CATALOGS = {48: "🆕 Лістинг", 161: "⚠️ Делістинг"}
+
+def fetch_binance_announcements() -> list[dict]:
+    """Нові лістинги/делістинги з офіційних анонсів Binance, що
+    стосуються монет з COINS_FOR_NEWS. Без ключа, публічний CMS API."""
+    results = []
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=ANNOUNCE_HOURS_BACK)
+    for cat_id, label in BINANCE_CATALOGS.items():
+        try:
+            r = requests.get(
+                "https://www.binance.com/bapi/composite/v1/public/cms/article/list/query",
+                params={"type": 1, "pageNo": 1, "pageSize": 10, "catalogId": cat_id},
+                headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+            if r.status_code != 200:
+                continue
+            catalogs = r.json().get("data", {}).get("catalogs", [])
+            if not catalogs:
+                continue
+            for art in catalogs[0].get("articles", []):
+                try:
+                    pub = datetime.fromtimestamp(art["releaseDate"] / 1000, tz=timezone.utc)
+                    if pub < cutoff:
+                        continue
+                    title = art.get("title", "")
+                    if not any(coin in title.upper() for coin in COINS_FOR_NEWS):
+                        continue
+                    results.append({
+                        "id":    f"ann_{art['id']}",
+                        "label": label,
+                        "title": title,
+                        "url":   f"https://www.binance.com/en/support/announcement/{art.get('code', '')}",
+                        "pub":   pub.strftime("%d.%m %H:%M"),
+                    })
+                except Exception:
+                    continue
+        except Exception as e:
+            print(f"  Binance announce error: {e}")
+    return results
+
+
+ECON_CURRENCIES = ("USD", "EUR")   # найбільше впливають на крипторинок
+
+def fetch_econ_calendar() -> list[dict]:
+    """High-impact макроподії (CPI, FOMC, NFP тощо) на найближчі
+    ECON_HOURS_AHEAD годин. Публічний JSON-фід календаря ForexFactory
+    (nfs.faireconomy.media) — без ключа, без офіційного SLA."""
+    results = []
+    try:
+        r = requests.get(
+            "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
+            headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+        if r.status_code != 200:
+            print(f"  Econ calendar HTTP {r.status_code}")
+            return []
+        now   = datetime.now(timezone.utc)
+        until = now + timedelta(hours=ECON_HOURS_AHEAD)
+        for ev in r.json():
+            try:
+                if ev.get("impact") != "High":
+                    continue
+                if ev.get("country") not in ECON_CURRENCIES:
+                    continue
+                when = datetime.fromisoformat(ev["date"]).astimezone(timezone.utc)
+                if not (now <= when <= until):
+                    continue
+                results.append({
+                    "id":       f"econ_{ev.get('title')}_{ev['date']}",
+                    "event":    ev.get("title", ""),
+                    "country":  ev.get("country", ""),
+                    "when":     when.strftime("%d.%m %H:%M"),
+                    "forecast": ev.get("forecast") or None,
+                    "prev":     ev.get("previous") or None,
+                })
+            except Exception:
+                continue
+    except Exception as e:
+        print(f"  Econ calendar error: {e}")
+    return sorted(results, key=lambda x: x["when"])
 
 
 # ══════════════════════════════════════════════════════════════
@@ -301,6 +396,27 @@ def fmt_news(news: list[dict], fg: int, fg_cls: str) -> str | None:
     lines.append("📱 Більше: cryptopanic.com")
     return "\n".join(lines)
 
+def fmt_announcement(a: dict) -> str:
+    return (
+        f"{a['label']} <b>Binance ({a['pub']})</b>\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"{a['title']}\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"🔗 {a['url']}"
+    )
+
+def fmt_econ(e: dict) -> str:
+    ev = (
+        f"📅 <b>Макроподія: {e['event']} ({e['country']})</b>\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"🕐 {e['when']} UTC"
+    )
+    if e.get("forecast") is not None:
+        ev += f"\n📊 Прогноз: {e['forecast']}"
+    if e.get("prev") is not None:
+        ev += f" | Попередній: {e['prev']}"
+    return ev
+
 
 # ══════════════════════════════════════════════════════════════
 # ГОЛОВНА ФУНКЦІЯ
@@ -353,6 +469,30 @@ def main():
             msg = fmt_news(news, fg, fg_cls)
             if msg and tg(msg, silent=True):  # silent = без звуку
                 mark_sent(news_key, cd); sent += 1
+
+    # ── 3. Лістинги/делістинги Binance ──────────────────────
+    print(f"  Анонси Binance...", end=" ")
+    announcements = fetch_binance_announcements()
+    print(f"{len(announcements)} нових")
+
+    for a in announcements:
+        if already_seen(a["id"], cd):
+            continue
+        if tg(fmt_announcement(a)):
+            mark_seen(a["id"], cd); sent += 1
+        time.sleep(0.3)
+
+    # ── 4. Макрокалендар (Finnhub) ──────────────────────────
+    print(f"  Econ calendar...", end=" ")
+    econ = fetch_econ_calendar()
+    print(f"{len(econ)} high-impact подій")
+
+    for e in econ:
+        if already_seen(e["id"], cd):
+            continue
+        if tg(fmt_econ(e), silent=True):
+            mark_seen(e["id"], cd); sent += 1
+        time.sleep(0.3)
 
     save_cd(cd)
     print(f"\n  Надіслано: {sent} повідомлень")
