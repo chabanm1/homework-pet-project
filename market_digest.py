@@ -59,26 +59,41 @@ def market_state(data: list[dict], fg: int, fg_cls: str) -> str:
         funding = d["funding"]
         fund_str = f" | fund={funding*100:+.3f}%" if funding is not None else ""
         lines.append(
-            f"<b>{coin}</b>: ${ind['price']:,.2f} ({ind['mom1h']:+.1f}%/1h) "
+            f"<b>{coin}</b>: ${sn.fmt_price(ind['price'])} ({ind['mom1h']:+.1f}%/1h) "
             f"RSI={ind['rsi']:.0f} {trend} обсяг×{ind['vs']:.1f}{fund_str}"
         )
     return "\n".join(lines)
 
 
+MAX_OPPORTUNITIES = 8   # топ-20 монет може дати забагато сетапів для одного Telegram-повідомлення
+
 def opportunities(data: list[dict]) -> str:
     lines = ["🎯 <b>ПОТЕНЦІЙНО ВИГІДНІ СЕТАПИ</b>", "━━━━━━━━━━━━━━━━"]
-    found = False
+    candidates = []
     for d in data:
         if d["ind"] is None or not d["sigs"]:
             continue
-        found = True
-        coin = d["sym"].split("/")[0]
         best = max(d["sigs"], key=lambda x: x["strength"])
+        candidates.append((d, best))
+    candidates.sort(key=lambda pair: pair[1]["strength"], reverse=True)
+
+    if not candidates:
+        lines.append("Чітких сетапів немає — ринок без вираженого напрямку")
+        return "\n".join(lines)
+
+    for d, best in candidates[:MAX_OPPORTUNITIES]:
+        coin = d["sym"].split("/")[0]
         e = {"LONG": "🟢", "SHORT": "🔴", "MOVE": "⚡", "VOL": "👀"}.get(best["type"], "📊")
         lines.append(f"{e} <b>{coin}</b> ({best['type']}, сила={best['strength']})")
         lines.append(f"   {best['text'].splitlines()[0]}")
-    if not found:
-        lines.append("Чітких сетапів немає — ринок без вираженого напрямку")
+        advice = sn.compact_advice(best, d["ind"])
+        if advice:
+            lines.append(advice)
+
+    if len(candidates) > MAX_OPPORTUNITIES:
+        lines.append(f"\n… ще {len(candidates) - MAX_OPPORTUNITIES} сетапів слабших за силою")
+
+    lines.append("\n⚠️ Евристика на основі ATR, не фінансова порада")
     return "\n".join(lines)
 
 

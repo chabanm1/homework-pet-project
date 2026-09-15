@@ -30,8 +30,13 @@ TELEGRAM_TOKEN    = os.getenv("TELEGRAM_TOKEN", "YOUR_BOT_TOKEN")
 TELEGRAM_CHAT_ID  = os.getenv("TELEGRAM_CHAT_ID", "YOUR_CHAT_ID")
 CRYPTOPANIC_KEY   = os.getenv("CRYPTOPANIC_KEY", "")   # безкоштовно на cryptopanic.com
 
-SYMBOLS = ["ETH/USDT", "BTC/USDT", "SOL/USDT"]  # Kraken spot
-COINS_FOR_NEWS = ["ETH", "BTC", "SOL", "BNB"]   # для фільтрації новин
+SYMBOLS = [   # топ-20 за обсягом на Kraken (USD-пари — ліквідніші за USDT там)
+    "BTC/USD", "ETH/USD", "XRP/USD", "SOL/USD", "ZEC/USD",
+    "HYPE/USD", "ADA/USD", "TAO/USD", "UNI/USD", "DOGE/USD",
+    "NEAR/USD", "SUI/USD", "XLM/USD", "LINK/USD", "XMR/USD",
+    "LTC/USD", "AAVE/USD", "ARB/USD", "ENA/USD", "INJ/USD",
+]
+COINS_FOR_NEWS = [s.split("/")[0] for s in SYMBOLS]   # для фільтрації новин/анонсів
 
 # Пороги
 MIN_SIGNAL_STRENGTH = 3     # 1-10, рекомендую 3
@@ -45,15 +50,36 @@ TRACK_HOURS   = 4      # через скільки годин перевірят
 TRACK_WIN_PCT = 0.3    # % руху в потрібний бік, щоб зарахувати сигнал як "вцілив"
 TRACK_CAP     = 300    # скільки записів історії сигналів зберігаємо
 
+ATR_SL_MULT      = 1.5   # стоп-лосс = ATR * це
+ATR_TP_MULT      = 2.5   # тейк-профіт = ATR * це (R:R ≈ 1.67)
+ATR_TRIGGER_MULT = 0.5   # для середніх сигналів — на скільки ATR чекати підтвердження
+STRONG_STRENGTH  = 8     # >= цього — "заходь зараз"
+MEDIUM_STRENGTH  = 6     # >= цього (і < STRONG) — "чекай підтвердження"
+                          # нижче MEDIUM — "не рухайся"
+
 COOLDOWN_FILE = os.getenv("COOLDOWN_FILE", "crypto_cooldown.json")
 COOLDOWN_MIN  = 120         # хвилин між однаковими сигналами
 SEEN_CAP      = 500         # скільки id одноразових подій пам'ятаємо
 
 
+def fmt_price(v: float) -> str:
+    """Адаптивна точність — топ-20 тепер включає монети від $0.05 до $100k+,
+    фіксовані 2 знаки після коми обнуляють дешеві (EMA=$0 для монети по $0.15)."""
+    if v >= 1:
+        return f"{v:,.2f}"
+    if v >= 0.01:
+        return f"{v:.4f}"
+    return f"{v:.6f}"
+
+
 # ══════════════════════════════════════════════════════════════
 # TELEGRAM
 # ══════════════════════════════════════════════════════════════
+TELEGRAM_MAX_LEN = 4096
+
 def tg(msg: str, silent: bool = False) -> bool:
+    if len(msg) > TELEGRAM_MAX_LEN:
+        msg = msg[:TELEGRAM_MAX_LEN - 20] + "\n… (обрізано)"
     if "YOUR_BOT_TOKEN" in TELEGRAM_TOKEN:
         print(f"[DEMO TG]\n{msg}\n")
         return True
@@ -346,11 +372,16 @@ def indicators(df: pd.DataFrame) -> dict:
     # Momentum
     mom1h = (float(c.iloc[-1]) - float(c.iloc[-2])) / float(c.iloc[-2]) * 100
     mom3h = (float(c.iloc[-1]) - float(c.iloc[-4])) / float(c.iloc[-4]) * 100 if len(c) > 4 else 0
+    # ATR(14) — для TP/SL порад
+    h, l = df["high"], df["low"]
+    prev_c = c.shift(1)
+    tr = pd.concat([h - l, (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
+    atr = float(tr.rolling(14).mean().iloc[-1])
     return {
         "price": float(c.iloc[-1]), "prev": float(c.iloc[-2]),
         "rsi": rsi, "macd_xu": macd_xu, "macd_xd": macd_xd,
         "e7": e7, "e25": e25, "e99": e99,
-        "vs": vs, "bb": bb_pct, "mom1h": mom1h, "mom3h": mom3h,
+        "vs": vs, "bb": bb_pct, "mom1h": mom1h, "mom3h": mom3h, "atr": atr,
     }
 
 
@@ -366,7 +397,7 @@ def signals(ind: dict, fg: int, funding: float | None = None) -> list[dict]:
         dir_ = "🟢" if ind["mom1h"] > 0 else "🔴"
         sigs.append({"type": "MOVE", "strength": 8 if abs(ind["mom1h"]) > 4 else 6,
                      "text": f"{dir_} Різкий рух: {ind['mom1h']:+.1f}% за годину\n"
-                             f"Ціна: ${p:,.2f} | Обсяг ×{vs:.1f}"})
+                             f"Ціна: ${fmt_price(p)} | Обсяг ×{vs:.1f}"})
 
     # Великий обсяг
     if vs >= 2.8:
@@ -402,11 +433,11 @@ def signals(ind: dict, fg: int, funding: float | None = None) -> list[dict]:
     # EMA25 пробій
     if ind["prev"] < ind["e25"] and p > ind["e25"] and vs > 1.2:
         sigs.append({"type": "LONG", "strength": 7,
-                     "text": f"🚀 Пробій EMA25 вгору! (${ind['e25']:.0f})\n"
+                     "text": f"🚀 Пробій EMA25 вгору! (${fmt_price(ind['e25'])})\n"
                              f"Обсяг ×{vs:.1f}"})
     if ind["prev"] > ind["e25"] and p < ind["e25"] and vs > 1.2:
         sigs.append({"type": "SHORT", "strength": 7,
-                     "text": f"💔 Пробій EMA25 вниз (${ind['e25']:.0f})\n"
+                     "text": f"💔 Пробій EMA25 вниз (${fmt_price(ind['e25'])})\n"
                              f"Обсяг ×{vs:.1f}"})
 
     # F&G extreme
@@ -441,22 +472,79 @@ def signals(ind: dict, fg: int, funding: float | None = None) -> list[dict]:
 # ══════════════════════════════════════════════════════════════
 # ФОРМАТУВАННЯ ПОВІДОМЛЕНЬ
 # ══════════════════════════════════════════════════════════════
+def tp_sl(price: float, atr: float, sig_type: str) -> tuple[float, float]:
+    """SL/TP на основі ATR(14). Груба евристика, не фінансова порада."""
+    if sig_type == "LONG":
+        return price - ATR_SL_MULT * atr, price + ATR_TP_MULT * atr
+    return price + ATR_SL_MULT * atr, price - ATR_TP_MULT * atr
+
+def advice_block(sig: dict, ind: dict) -> str:
+    """Порада за силою сигналу: сильний → заходь зараз з TP/SL,
+    середній → чекай підтвердження на рівні, слабкий → не рухайся."""
+    if sig["type"] not in ("LONG", "SHORT") or not ind.get("atr"):
+        return ""
+    price, atr = ind["price"], ind["atr"]
+    action = "BUY / LONG" if sig["type"] == "LONG" else "SELL / SHORT"
+    strength = sig["strength"]
+
+    if strength >= STRONG_STRENGTH:
+        sl, tp = tp_sl(price, atr, sig["type"])
+        return (
+            f"\n🎯 <b>ПОРАДА: СИЛЬНИЙ — заходь зараз {action}</b>\n"
+            f"SL: ${fmt_price(sl)} | TP: ${fmt_price(tp)}"
+        )
+    if strength >= MEDIUM_STRENGTH:
+        trig = price + ATR_TRIGGER_MULT * atr if sig["type"] == "LONG" else price - ATR_TRIGGER_MULT * atr
+        sl, tp = tp_sl(trig, atr, sig["type"])
+        move = "підніметься" if sig["type"] == "LONG" else "опуститься"
+        return (
+            f"\n🟡 <b>ПОРАДА: СЕРЕДНІЙ — чекай підтвердження</b>\n"
+            f"Якщо ціна {move} до ${fmt_price(trig)} → {action}\n"
+            f"SL: ${fmt_price(sl)} | TP: ${fmt_price(tp)}"
+        )
+    return "\n⚪ <b>ПОРАДА: СЛАБКИЙ — краще не рухатись, просто тримай на радарі</b>"
+
+def compact_advice(sig: dict, ind: dict) -> str:
+    """Однорядкова версія advice_block — для дайджесту з багатьма монетами."""
+    if sig["type"] not in ("LONG", "SHORT") or not ind.get("atr"):
+        return ""
+    price, atr = ind["price"], ind["atr"]
+    action = "BUY" if sig["type"] == "LONG" else "SELL"
+    strength = sig["strength"]
+    if strength >= STRONG_STRENGTH:
+        sl, tp = tp_sl(price, atr, sig["type"])
+        return f"   → {action} зараз | SL ${fmt_price(sl)} TP ${fmt_price(tp)}"
+    if strength >= MEDIUM_STRENGTH:
+        trig = price + ATR_TRIGGER_MULT * atr if sig["type"] == "LONG" else price - ATR_TRIGGER_MULT * atr
+        return f"   → чекай ${fmt_price(trig)} → {action}"
+    return "   → краще не рухайся"
+
+def nearby_econ_note(econ: list[dict], hours: float = 8) -> str:
+    """Коротке нагадування про макроподію, якщо вона зовсім скоро —
+    щоб не ставити SL/TP прямо перед FOMC чи NFP наосліп."""
+    if not econ:
+        return ""
+    soon = econ[:2]   # econ вже відсортований за часом
+    lines = ["\n📅 <b>Скоро:</b>"] + [f"  🕐 {e['when']} {e['country']} — {e['event']}" for e in soon]
+    return "\n".join(lines)
+
 def fmt_signal(symbol: str, ind: dict, fg: int, fg_cls: str,
-               sig: dict) -> str:
-    coin = symbol.split("/")[0]
-    t    = datetime.now().strftime("%H:%M")
+               sig: dict, econ: list[dict] | None = None) -> str:
+    t = datetime.now().strftime("%H:%M")
     e = {"LONG":"🟢","SHORT":"🔴","MOVE":"⚡","VOL":"👀"}.get(sig["type"],"📊")
     return (
-        f"{e} <b>{coin}/USDT — {sig['type']} ({t})</b>\n"
+        f"{e} <b>{symbol} — {sig['type']} ({t})</b>\n"
         f"━━━━━━━━━━━━━━━━\n"
         f"{sig['text']}\n"
         f"━━━━━━━━━━━━━━━━\n"
-        f"💰 Ціна: <b>${ind['price']:,.2f}</b> ({ind['mom1h']:+.1f}%/1h)\n"
+        f"💰 Ціна: <b>${fmt_price(ind['price'])}</b> ({ind['mom1h']:+.1f}%/1h)\n"
         f"📊 RSI={ind['rsi']:.0f} | F&G={fg} {fg_cls}\n"
-        f"📉 EMA7=${ind['e7']:.0f} | EMA25=${ind['e25']:.0f}\n"
+        f"📉 EMA7=${fmt_price(ind['e7'])} | EMA25=${fmt_price(ind['e25'])}\n"
         f"📦 Обсяг ×{ind['vs']:.1f}\n"
-        f"━━━━━━━━━━━━━━━━\n"
-        f"⚡ <b>Зайди глянь!</b>"
+        f"━━━━━━━━━━━━━━━━"
+        f"{advice_block(sig, ind)}"
+        f"{nearby_econ_note(econ or [])}\n"
+        f"⚠️ Евристика на основі ATR, не фінансова порада"
     )
 
 def fmt_news(news: list[dict], fg: int, fg_cls: str) -> str | None:
@@ -511,6 +599,9 @@ def main():
     fg, fg_cls = fetch_fg()
     print(f"  F&G: {fg} ({fg_cls})")
 
+    econ = fetch_econ_calendar()   # фетчимо раз — і для алертів (4), і для нотаток у сигналах
+    print(f"  Econ calendar: {len(econ)} high-impact подій")
+
     sent = 0
 
     # ── 1. Технічні сигнали ─────────────────────────────────
@@ -541,7 +632,7 @@ def main():
         if not ok_to_send(key, cd):
             print(f"  → cooldown активний"); continue
 
-        msg = fmt_signal(sym, ind, fg, fg_cls, best)
+        msg = fmt_signal(sym, ind, fg, fg_cls, best, econ)
         if tg(msg):
             mark_sent(key, cd)
             track_signal(sym, best["type"], ind["price"], cd)
@@ -572,11 +663,7 @@ def main():
             mark_seen(a["id"], cd); sent += 1
         time.sleep(0.3)
 
-    # ── 4. Макрокалендар (Finnhub) ──────────────────────────
-    print(f"  Econ calendar...", end=" ")
-    econ = fetch_econ_calendar()
-    print(f"{len(econ)} high-impact подій")
-
+    # ── 4. Макрокалендар — окремі одноразові алерти ─────────
     for e in econ:
         if already_seen(e["id"], cd):
             continue
