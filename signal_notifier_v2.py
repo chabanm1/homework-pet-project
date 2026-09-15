@@ -41,6 +41,10 @@ ANNOUNCE_HOURS_BACK = 24    # шукати анонси Binance за остан�
 ECON_HOURS_AHEAD    = 24    # шукати макроподії на найближчі N годин
 FUNDING_EXTREME     = 0.0004  # 0.04%/8h — за межею цього вважаємо funding екстремальним
 
+TRACK_HOURS   = 4      # через скільки годин перевіряти результат сигналу
+TRACK_WIN_PCT = 0.3    # % руху в потрібний бік, щоб зарахувати сигнал як "вцілив"
+TRACK_CAP     = 300    # скільки записів історії сигналів зберігаємо
+
 COOLDOWN_FILE = os.getenv("COOLDOWN_FILE", "crypto_cooldown.json")
 COOLDOWN_MIN  = 120         # хвилин між однаковими сигналами
 SEEN_CAP      = 500         # скільки id одноразових подій пам'ятаємо
@@ -96,6 +100,53 @@ def mark_seen(key: str, cd: dict):
     seen = cd.setdefault("_seen", [])
     seen.append(key)
     del seen[:-SEEN_CAP]
+
+
+# ══════════════════════════════════════════════════════════════
+# ТРЕКІНГ ЕФЕКТИВНОСТІ СИГНАЛІВ
+# ══════════════════════════════════════════════════════════════
+def track_signal(sym: str, sig_type: str, price: float, cd: dict):
+    """Запам'ятовує LONG/SHORT сигнал, щоб через TRACK_HOURS перевірити,
+    чи ціна реально пішла в передбачений бік."""
+    if sig_type not in ("LONG", "SHORT"):
+        return   # MOVE/VOL не є направленою ставкою — нема що звіряти
+    track = cd.setdefault("_track", [])
+    track.append({
+        "sym": sym, "type": sig_type, "price0": price,
+        "ts": time.time(), "check_at": time.time() + TRACK_HOURS * 3600,
+        "resolved": False,
+    })
+    del track[:-TRACK_CAP]
+
+def resolve_tracked(sym: str, price_now: float, cd: dict) -> list[dict]:
+    """Дорізає результат по записах цього символу, час перевірки яких настав."""
+    resolved = []
+    now = time.time()
+    for rec in cd.get("_track", []):
+        if rec["sym"] != sym or rec.get("resolved") or rec["check_at"] > now:
+            continue
+        pct = (price_now - rec["price0"]) / rec["price0"] * 100
+        hit = (pct >= TRACK_WIN_PCT) if rec["type"] == "LONG" else (pct <= -TRACK_WIN_PCT)
+        miss = (pct <= -TRACK_WIN_PCT) if rec["type"] == "LONG" else (pct >= TRACK_WIN_PCT)
+        rec["resolved"] = True
+        rec["pct"]      = pct
+        rec["outcome"]  = "win" if hit else ("loss" if miss else "flat")
+        resolved.append(rec)
+    return resolved
+
+def signal_stats(cd: dict, days: float = 7) -> dict:
+    """Win-rate по вирішених сигналах за останні `days` днів."""
+    cutoff = time.time() - days * 86400
+    recs = [r for r in cd.get("_track", []) if r.get("resolved") and r["ts"] >= cutoff]
+    wins  = sum(1 for r in recs if r["outcome"] == "win")
+    losses = sum(1 for r in recs if r["outcome"] == "loss")
+    flats  = sum(1 for r in recs if r["outcome"] == "flat")
+    decided = wins + losses
+    return {
+        "total": len(recs), "wins": wins, "losses": losses, "flats": flats,
+        "win_rate": (wins / decided * 100) if decided else None,
+        "avg_pct": (sum(r["pct"] for r in recs) / len(recs)) if recs else None,
+    }
 
 
 # ══════════════════════════════════════════════════════════════
@@ -462,7 +513,13 @@ def main():
 
         ind     = indicators(df)
         funding = fetch_funding(sym)
-        sigs    = [s for s in signals(ind, fg, funding) if s["strength"] >= MIN_SIGNAL_STRENGTH]
+
+        resolved = resolve_tracked(sym, ind["price"], cd)
+        for r in resolved:
+            e = {"win": "✅", "loss": "❌", "flat": "➖"}[r["outcome"]]
+            print(f"  [track] {r['type']} {sym} {r['pct']:+.2f}% {e}")
+
+        sigs = [s for s in signals(ind, fg, funding) if s["strength"] >= MIN_SIGNAL_STRENGTH]
 
         if not sigs:
             print(f"сигналів немає (RSI={ind['rsi']:.0f} mov={ind['mom1h']:+.1f}%)")
@@ -477,7 +534,9 @@ def main():
 
         msg = fmt_signal(sym, ind, fg, fg_cls, best)
         if tg(msg):
-            mark_sent(key, cd); sent += 1
+            mark_sent(key, cd)
+            track_signal(sym, best["type"], ind["price"], cd)
+            sent += 1
         time.sleep(0.3)
 
     # ── 2. Новини ────────────────────────────────────────────

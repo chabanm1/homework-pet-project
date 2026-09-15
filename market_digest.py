@@ -110,6 +110,21 @@ def whats_new() -> str | None:
     return "\n".join(lines)
 
 
+def performance() -> str | None:
+    cd = sn.load_cd()
+    stats = sn.signal_stats(cd, days=7)
+    if stats["total"] == 0:
+        return None
+    lines = ["📈 <b>ТОЧНІСТЬ СИГНАЛІВ (7 днів)</b>", "━━━━━━━━━━━━━━━━"]
+    if stats["win_rate"] is not None:
+        lines.append(f"Win-rate: {stats['win_rate']:.0f}% ({stats['wins']}W/{stats['losses']}L, {stats['flats']} flat)")
+    else:
+        lines.append(f"{stats['flats']} flat, ще недостатньо вирішених сигналів")
+    if stats["avg_pct"] is not None:
+        lines.append(f"Середній рух: {stats['avg_pct']:+.2f}%")
+    return "\n".join(lines)
+
+
 def main():
     now_kyiv = datetime.now(KYIV)
     print(f"\n{'='*52}\n  MARKET DIGEST | {now_kyiv.strftime('%Y-%m-%d %H:%M %Z')}\n{'='*52}")
@@ -123,6 +138,10 @@ def main():
         market_state(data, fg, fg_cls),
         opportunities(data),
     ]
+    perf_block = performance()
+    if perf_block:
+        parts.append(perf_block)
+
     news_block = whats_new()
     if news_block:
         parts.append(news_block)

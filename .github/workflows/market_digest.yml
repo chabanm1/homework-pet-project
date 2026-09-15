@@ -24,6 +24,17 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # Тільки читаємо — записує й оновлює цей файл реактивний notifier-job.
+      # Ключ спільний для обох workflow (репозиторій/гілка), тому підхоплює
+      # найсвіжіший стан незалежно від того, який job його зберіг останнім.
+      - name: Restore signal tracking state
+        uses: actions/cache/restore@v4
+        with:
+          path: crypto_cooldown.json
+          key: cooldown-${{ github.run_id }}
+          restore-keys: |
+            cooldown-
+
       - name: Run market digest
         env:
           TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
