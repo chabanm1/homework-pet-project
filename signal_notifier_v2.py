@@ -40,7 +40,8 @@ SYMBOLS = [   # топ-20 за обсягом на Kraken (USD-пари — лі
 COINS_FOR_NEWS = [s.split("/")[0] for s in SYMBOLS]   # для фільтрації новин/анонсів
 
 # Пороги
-MIN_SIGNAL_STRENGTH = 3     # 1-10, рекомендую 3
+MIN_SIGNAL_STRENGTH  = 3    # 1-10, рекомендую 3
+MAX_SIGNALS_PER_RUN  = 5    # топ-N за силою — щоб 20 монет не слали 20 окремих алертів
 PRICE_MOVE_ALERT    = 2.5   # % за останню годину → сповіщення
 NEWS_HOURS_BACK     = 1.5   # шукати новини за останні N годин
 ANNOUNCE_HOURS_BACK = 24    # шукати анонси Binance за останні N годин
@@ -700,7 +701,10 @@ def main():
 
     sent = 0
 
-    # ── 1. Технічні сигнали ─────────────────────────────────
+    # ── 1. Технічні сигнали — збираємо кандидатів з усіх монет,───
+    #      потім шлемо тільки топ-N найсильніших одним прогоном,
+    #      а не окреме повідомлення на кожну з 20 монет.
+    candidates = []
     for sym in SYMBOLS:
         print(f"\n  {sym}...", end=" ")
         df = fetch_ohlcv(sym, "1h", 100)
@@ -729,10 +733,18 @@ def main():
         if not ok_to_send(key, cd):
             print(f"  → cooldown активний"); continue
 
-        msg = fmt_signal(sym, ind, fg, fg_cls, best, econ)
+        candidates.append({"sym": sym, "ind": ind, "best": best, "key": key})
+
+    candidates.sort(key=lambda c: c["best"]["strength"], reverse=True)
+    top = candidates[:MAX_SIGNALS_PER_RUN]
+    if len(candidates) > len(top):
+        print(f"\n  {len(candidates) - len(top)} сигналів не потрапили в топ-{MAX_SIGNALS_PER_RUN}, пропущено цей прогін")
+
+    for c in top:
+        msg = fmt_signal(c["sym"], c["ind"], fg, fg_cls, c["best"], econ)
         if tg(msg):
-            mark_sent(key, cd)
-            track_signal(sym, best["type"], ind["price"], cd, best.get("rule", "OTHER"))
+            mark_sent(c["key"], cd)
+            track_signal(c["sym"], c["best"]["type"], c["ind"]["price"], cd, c["best"].get("rule", "OTHER"))
             sent += 1
         time.sleep(0.3)
 
