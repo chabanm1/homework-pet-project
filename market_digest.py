@@ -22,6 +22,9 @@ KYIV = ZoneInfo("Europe/Kyiv")
 FRESH_HOURS = 1     # вікно "що нового" — під інтервал запуску (раз/год)
 ECON_LOOKAHEAD_HOURS = 6   # на скільки годин вперед показувати макроподії
 
+QUIET_HOURS_START = 1   # з 01:00 до 09:00 за Києвом дайджест не турбує
+QUIET_HOURS_END   = 9
+
 
 def fetch_symbol_data(fg: int) -> list[dict]:
     """Одне зведення OHLCV + funding + сигналів на символ — і для
@@ -128,6 +131,10 @@ def performance() -> str | None:
 def main():
     now_kyiv = datetime.now(KYIV)
     print(f"\n{'='*52}\n  MARKET DIGEST | {now_kyiv.strftime('%Y-%m-%d %H:%M %Z')}\n{'='*52}")
+
+    if QUIET_HOURS_START <= now_kyiv.hour < QUIET_HOURS_END:
+        print(f"  → тихі години ({QUIET_HOURS_START}:00-{QUIET_HOURS_END}:00 Київ), виходжу")
+        return
 
     fg, fg_cls = sn.fetch_fg()
     print(f"  F&G: {fg} ({fg_cls})")
