@@ -26,10 +26,11 @@ QUIET_HOURS_START = 1   # з 01:00 до 09:00 за Києвом дайджест
 QUIET_HOURS_END   = 9
 
 
-def fetch_symbol_data(fg: int) -> list[dict]:
+def fetch_symbol_data(fg: int, cd: dict) -> list[dict]:
     """Одне зведення OHLCV + funding + сигналів на символ — і для
     market_state, і для opportunities, щоб не тягти дані двічі."""
     data = []
+    btc_mom1h = None   # BTC/USD іде першим у SYMBOLS
     for sym in sn.SYMBOLS:
         df = sn.fetch_ohlcv(sym, "1h", 100)
         if df.empty:
@@ -38,7 +39,10 @@ def fetch_symbol_data(fg: int) -> list[dict]:
         ind       = sn.indicators(df)
         funding   = sn.fetch_funding(sym)
         htf_trend = sn.fetch_trend(sym)
-        sigs      = [s for s in sn.signals(ind, fg, funding, htf_trend) if s["strength"] >= sn.MIN_SIGNAL_STRENGTH]
+        if sym == "BTC/USD":
+            btc_mom1h = ind["mom1h"]
+        sigs = [s for s in sn.signals(ind, fg, funding, htf_trend, cd, None if sym == "BTC/USD" else btc_mom1h)
+                if s["strength"] >= sn.MIN_SIGNAL_STRENGTH]
         data.append({"sym": sym, "ind": ind, "funding": funding, "sigs": sigs})
     return data
 
@@ -137,8 +141,7 @@ RULE_NAMES = {
     "FUNDING_EXTREME": "Funding екстремум", "OTHER": "Інше",
 }
 
-def performance() -> str | None:
-    cd = sn.load_cd()
+def performance(cd: dict) -> str | None:
     stats = sn.signal_stats(cd, days=7)
     if stats["total"] == 0:
         return None
@@ -171,16 +174,17 @@ def main():
         print(f"  → тихі години ({QUIET_HOURS_START}:00-{QUIET_HOURS_END}:00 Київ), виходжу")
         return
 
+    cd = sn.load_cd()
     fg, fg_cls = sn.fetch_fg()
     print(f"  F&G: {fg} ({fg_cls})")
-    data = fetch_symbol_data(fg)
+    data = fetch_symbol_data(fg, cd)
 
     parts = [
         f"🕐 <b>ДАЙДЖЕСТ РИНКУ ({now_kyiv.strftime('%d.%m %H:%M')})</b>",
         market_state(data, fg, fg_cls),
         opportunities(data),
     ]
-    perf_block = performance()
+    perf_block = performance(cd)
     if perf_block:
         parts.append(perf_block)
 

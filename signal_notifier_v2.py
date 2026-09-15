@@ -201,6 +201,27 @@ def signal_stats_by_rule(cd: dict, days: float = 1, min_n: int = 3) -> list[dict
     out.sort(key=lambda x: (x["win_rate"] is None, -(x["win_rate"] or 0)))
     return out
 
+RULE_LEARN_DAYS  = 14   # ширше вікно, ніж денна розбивка в дайджесті — рішення "приглушити" мають спиратись на більше даних
+RULE_LEARN_MIN_N = 15   # мінімум вирішених сигналів цього типу, щоб довіряти відсотку
+RULE_LEARN_LOW   = 40   # win-rate нижче — тип вважаємо стабільно слабким
+RULE_LEARN_HIGH  = 65   # win-rate вище — тип вважаємо стабільно сильним
+RULE_LEARN_PENALTY = 3
+RULE_LEARN_BONUS   = 1
+
+def rule_win_rate(cd: dict, rule: str) -> float | None:
+    """Win-rate конкретного типу сигналу за RULE_LEARN_DAYS — None, якщо
+    даних замало, щоб довіряти. Використовується, щоб бот сам приглушував
+    типи, які стабільно програють, замість того щоб довіряти всім однаково."""
+    cutoff = time.time() - RULE_LEARN_DAYS * 86400
+    recs = [r for r in cd.get("_track", [])
+            if r.get("resolved") and r["ts"] >= cutoff and r.get("rule") == rule]
+    wins   = sum(1 for r in recs if r["outcome"] == "win")
+    losses = sum(1 for r in recs if r["outcome"] == "loss")
+    decided = wins + losses
+    if decided < RULE_LEARN_MIN_N:
+        return None
+    return wins / decided * 100
+
 
 # ══════════════════════════════════════════════════════════════
 # ДАНІ
@@ -469,7 +490,10 @@ def indicators(df: pd.DataFrame) -> dict:
 TREND_BONUS   = 1   # сигнал за трендом 4h — сила +1 (макс 10)
 TREND_PENALTY = 2   # сигнал проти тренду 4h — сила -2 (мін 1), бо контр-трендові статистично слабші
 
-def signals(ind: dict, fg: int, funding: float | None = None, htf_trend: str | None = None) -> list[dict]:
+BTC_CORRELATION_MOM = 1.0   # |BTC mom1h| вище цього — вважаємо рух ринковим, не монето-специфічним
+
+def signals(ind: dict, fg: int, funding: float | None = None, htf_trend: str | None = None,
+            cd: dict | None = None, btc_mom1h: float | None = None) -> list[dict]:
     p, rsi, vs, bb = ind["price"], ind["rsi"], ind["vs"], ind["bb"]
     sigs = []
 
@@ -561,6 +585,33 @@ def signals(ind: dict, fg: int, funding: float | None = None, htf_trend: str | N
             else:
                 s["strength"] = max(1, s["strength"] - TREND_PENALTY)
                 s["text"] += "\n⚠️ Проти тренду 4h — обережно"
+
+    # Навчання на власній історії: типи сигналів, що стабільно програють
+    # (RULE_LEARN_MIN_N+ вирішених за RULE_LEARN_DAYS днів) — приглушуємо;
+    # стабільно виграшні — трохи підсилюємо. Це і є "бот вчиться на помилках".
+    if cd is not None:
+        for s in sigs:
+            if s["type"] not in ("LONG", "SHORT"):
+                continue
+            wr = rule_win_rate(cd, s.get("rule", "OTHER"))
+            if wr is None:
+                continue
+            if wr < RULE_LEARN_LOW:
+                s["strength"] = max(1, s["strength"] - RULE_LEARN_PENALTY)
+                s["text"] += f"\n📉 Цей тип історично слабкий (win-rate {wr:.0f}% за {RULE_LEARN_DAYS}д)"
+            elif wr > RULE_LEARN_HIGH:
+                s["strength"] = min(10, s["strength"] + RULE_LEARN_BONUS)
+                s["text"] += f"\n📈 Цей тип історично сильний (win-rate {wr:.0f}% за {RULE_LEARN_DAYS}д)"
+
+    # Кореляція з BTC — попереджаємо, що це може бути загальноринковий рух,
+    # а не унікальна можливість саме в цій монеті
+    if btc_mom1h is not None and abs(btc_mom1h) >= BTC_CORRELATION_MOM:
+        for s in sigs:
+            if s["type"] not in ("LONG", "SHORT"):
+                continue
+            same_dir = (s["type"] == "LONG" and btc_mom1h > 0) or (s["type"] == "SHORT" and btc_mom1h < 0)
+            if same_dir:
+                s["text"] += f"\n🌊 BTC теж рухається так само ({btc_mom1h:+.1f}%/1h) — можливо, це ринковий рух, не унікальний сетап"
 
     return sigs
 
@@ -705,6 +756,7 @@ def main():
     #      потім шлемо тільки топ-N найсильніших одним прогоном,
     #      а не окреме повідомлення на кожну з 20 монет.
     candidates = []
+    btc_mom1h  = None   # BTC/USD іде першим у SYMBOLS — заповнюється в першій ітерації
     for sym in SYMBOLS:
         print(f"\n  {sym}...", end=" ")
         df = fetch_ohlcv(sym, "1h", 100)
@@ -714,13 +766,16 @@ def main():
         ind       = indicators(df)
         funding   = fetch_funding(sym)
         htf_trend = fetch_trend(sym)
+        if sym == "BTC/USD":
+            btc_mom1h = ind["mom1h"]
 
         resolved = resolve_tracked(sym, ind["price"], cd)
         for r in resolved:
             e = {"win": "✅", "loss": "❌", "flat": "➖"}[r["outcome"]]
             print(f"  [track] {r['type']} {sym} {r['pct']:+.2f}% {e}")
 
-        sigs = [s for s in signals(ind, fg, funding, htf_trend) if s["strength"] >= MIN_SIGNAL_STRENGTH]
+        sigs = [s for s in signals(ind, fg, funding, htf_trend, cd, None if sym == "BTC/USD" else btc_mom1h)
+                if s["strength"] >= MIN_SIGNAL_STRENGTH]
 
         if not sigs:
             print(f"сигналів немає (RSI={ind['rsi']:.0f} mov={ind['mom1h']:+.1f}%)")
