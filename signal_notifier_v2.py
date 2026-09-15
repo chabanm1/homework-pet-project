@@ -30,7 +30,7 @@ TELEGRAM_TOKEN    = os.getenv("TELEGRAM_TOKEN", "YOUR_BOT_TOKEN")
 TELEGRAM_CHAT_ID  = os.getenv("TELEGRAM_CHAT_ID", "YOUR_CHAT_ID")
 CRYPTOPANIC_KEY   = os.getenv("CRYPTOPANIC_KEY", "")   # безкоштовно на cryptopanic.com
 
-SYMBOLS = ["ETH/USDT", "BTC/USDT", "SOL/USDT"]
+SYMBOLS = ["ETH/USDT:USDT", "BTC/USDT:USDT", "SOL/USDT:USDT"]  # Bybit perpetual swap
 COINS_FOR_NEWS = ["ETH", "BTC", "SOL", "BNB"]   # для фільтрації новин
 
 # Пороги
@@ -66,6 +66,8 @@ def tg(msg: str, silent: bool = False) -> bool:
                 "parse_mode":           "HTML",
                 "disable_notification": silent,
             }, timeout=10)
+        if r.status_code != 200:
+            print(f"TG error: HTTP {r.status_code} {r.text[:300]}")
         return r.status_code == 200
     except Exception as e:
         print(f"TG error: {e}"); return False
@@ -152,10 +154,14 @@ def signal_stats(cd: dict, days: float = 7) -> dict:
 # ══════════════════════════════════════════════════════════════
 # ДАНІ
 # ══════════════════════════════════════════════════════════════
+def _exchange():
+    # Binance геоблокує весь свій API (навіть публічні ендпоінти) з дата-центрів
+    # GitHub Actions (HTTP 451) — Bybit публічні ринкові дані звідти доступні.
+    return ccxt.bybit({"options": {"defaultType": "swap"}, "enableRateLimit": True})
+
 def fetch_ohlcv(symbol: str, tf="1h", limit=100):
     try:
-        ex = ccxt.binance({"options": {"defaultType": "future"},
-                           "enableRateLimit": True})
+        ex = _exchange()
         bars = ex.fetch_ohlcv(symbol, tf, limit=limit)
         df = pd.DataFrame(bars, columns=["ts","open","high","low","close","vol"])
         df["time"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
@@ -166,9 +172,7 @@ def fetch_ohlcv(symbol: str, tf="1h", limit=100):
 def fetch_funding(symbol: str) -> float | None:
     """Funding rate ф'ючерса (частка за 8-годинний період, напр. 0.0005 = 0.05%)."""
     try:
-        ex = ccxt.binance({"options": {"defaultType": "future"},
-                           "enableRateLimit": True})
-        return ex.fetch_funding_rate(symbol).get("fundingRate")
+        return _exchange().fetch_funding_rate(symbol).get("fundingRate")
     except Exception as e:
         print(f"  Funding {symbol}: {e}"); return None
 
