@@ -231,6 +231,20 @@ def fetch_funding(symbol: str) -> float | None:
     except Exception as e:
         print(f"  Funding {symbol}: {e}"); return None
 
+def fetch_trend(symbol: str, tf: str = "4h", limit: int = 100) -> str | None:
+    """Напрямок старшого таймфрейму (за замовч. 4h) — 'up'/'down'/'flat',
+    щоб не довіряти 1h-сигналу проти більшого тренду (як з TAO, де 1h
+    RSI-перепроданість була просто епізодом у низхідному 4h-тренді)."""
+    df = fetch_ohlcv(symbol, tf, limit)
+    if df.empty or len(df) < 30:
+        return None
+    ind = indicators(df)
+    if ind["e7"] > ind["e25"] > ind["e99"]:
+        return "up"
+    if ind["e7"] < ind["e25"] < ind["e99"]:
+        return "down"
+    return "flat"
+
 def fetch_fg() -> tuple[int, str]:
     try:
         r = requests.get("https://api.alternative.me/fng/?limit=1",
@@ -451,7 +465,10 @@ def indicators(df: pd.DataFrame) -> dict:
 # ══════════════════════════════════════════════════════════════
 # СИГНАЛИ
 # ══════════════════════════════════════════════════════════════
-def signals(ind: dict, fg: int, funding: float | None = None) -> list[dict]:
+TREND_BONUS   = 1   # сигнал за трендом 4h — сила +1 (макс 10)
+TREND_PENALTY = 2   # сигнал проти тренду 4h — сила -2 (мін 1), бо контр-трендові статистично слабші
+
+def signals(ind: dict, fg: int, funding: float | None = None, htf_trend: str | None = None) -> list[dict]:
     p, rsi, vs, bb = ind["price"], ind["rsi"], ind["vs"], ind["bb"]
     sigs = []
 
@@ -528,6 +545,21 @@ def signals(ind: dict, fg: int, funding: float | None = None) -> list[dict]:
             sigs.append({"type": "LONG", "rule": "FUNDING_EXTREME", "strength": 6,
                          "text": f"💰 Funding={funding*100:.3f}%/8г — шорти переплачують\n"
                                  f"Перегрів у шортах, contrarian LONG"})
+
+    # Поправка на тренд старшого таймфрейму (4h) — TAO-урок: 1h RSI-відскок
+    # проти більшого тренду частіше програє, ніж вигравав у нашому трекінгу
+    if htf_trend in ("up", "down"):
+        for s in sigs:
+            if s["type"] not in ("LONG", "SHORT"):
+                continue
+            aligned = (s["type"] == "LONG" and htf_trend == "up") or \
+                      (s["type"] == "SHORT" and htf_trend == "down")
+            if aligned:
+                s["strength"] = min(10, s["strength"] + TREND_BONUS)
+                s["text"] += "\n✅ За трендом 4h"
+            else:
+                s["strength"] = max(1, s["strength"] - TREND_PENALTY)
+                s["text"] += "\n⚠️ Проти тренду 4h — обережно"
 
     return sigs
 
@@ -675,15 +707,16 @@ def main():
         if df.empty:
             print("! немає даних"); continue
 
-        ind     = indicators(df)
-        funding = fetch_funding(sym)
+        ind       = indicators(df)
+        funding   = fetch_funding(sym)
+        htf_trend = fetch_trend(sym)
 
         resolved = resolve_tracked(sym, ind["price"], cd)
         for r in resolved:
             e = {"win": "✅", "loss": "❌", "flat": "➖"}[r["outcome"]]
             print(f"  [track] {r['type']} {sym} {r['pct']:+.2f}% {e}")
 
-        sigs = [s for s in signals(ind, fg, funding) if s["strength"] >= MIN_SIGNAL_STRENGTH]
+        sigs = [s for s in signals(ind, fg, funding, htf_trend) if s["strength"] >= MIN_SIGNAL_STRENGTH]
 
         if not sigs:
             print(f"сигналів немає (RSI={ind['rsi']:.0f} mov={ind['mom1h']:+.1f}%)")

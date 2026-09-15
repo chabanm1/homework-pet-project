@@ -35,9 +35,10 @@ def fetch_symbol_data(fg: int) -> list[dict]:
         if df.empty:
             data.append({"sym": sym, "ind": None})
             continue
-        ind     = sn.indicators(df)
-        funding = sn.fetch_funding(sym)
-        sigs    = [s for s in sn.signals(ind, fg, funding) if s["strength"] >= sn.MIN_SIGNAL_STRENGTH]
+        ind       = sn.indicators(df)
+        funding   = sn.fetch_funding(sym)
+        htf_trend = sn.fetch_trend(sym)
+        sigs      = [s for s in sn.signals(ind, fg, funding, htf_trend) if s["strength"] >= sn.MIN_SIGNAL_STRENGTH]
         data.append({"sym": sym, "ind": ind, "funding": funding, "sigs": sigs})
     return data
 
