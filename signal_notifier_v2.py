@@ -119,7 +119,7 @@ def fetch_fg() -> tuple[int, str]:
     except Exception:
         return 50, "Neutral"
 
-def fetch_news() -> list[dict]:
+def fetch_news(hours_back: float = NEWS_HOURS_BACK) -> list[dict]:
     """Новини з CryptoPanic (hot + important)."""
     results = []
     try:
@@ -136,7 +136,7 @@ def fetch_news() -> list[dict]:
         if r.status_code != 200:
             return []
 
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=NEWS_HOURS_BACK)
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours_back)
         for item in r.json().get("results", [])[:20]:
             try:
                 pub = datetime.fromisoformat(
@@ -165,11 +165,11 @@ def fetch_news() -> list[dict]:
 # Binance CMS catalog IDs (публічні, без ключа)
 BINANCE_CATALOGS = {48: "🆕 Лістинг", 161: "⚠️ Делістинг"}
 
-def fetch_binance_announcements() -> list[dict]:
+def fetch_binance_announcements(hours_back: float = ANNOUNCE_HOURS_BACK) -> list[dict]:
     """Нові лістинги/делістинги з офіційних анонсів Binance, що
     стосуються монет з COINS_FOR_NEWS. Без ключа, публічний CMS API."""
     results = []
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=ANNOUNCE_HOURS_BACK)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours_back)
     for cat_id, label in BINANCE_CATALOGS.items():
         try:
             r = requests.get(
@@ -205,9 +205,9 @@ def fetch_binance_announcements() -> list[dict]:
 
 ECON_CURRENCIES = ("USD", "EUR")   # найбільше впливають на крипторинок
 
-def fetch_econ_calendar() -> list[dict]:
+def fetch_econ_calendar(hours_ahead: float = ECON_HOURS_AHEAD) -> list[dict]:
     """High-impact макроподії (CPI, FOMC, NFP тощо) на найближчі
-    ECON_HOURS_AHEAD годин. Публічний JSON-фід календаря ForexFactory
+    hours_ahead годин. Публічний JSON-фід календаря ForexFactory
     (nfs.faireconomy.media) — без ключа, без офіційного SLA."""
     results = []
     try:
@@ -218,7 +218,7 @@ def fetch_econ_calendar() -> list[dict]:
             print(f"  Econ calendar HTTP {r.status_code}")
             return []
         now   = datetime.now(timezone.utc)
-        until = now + timedelta(hours=ECON_HOURS_AHEAD)
+        until = now + timedelta(hours=hours_ahead)
         for ev in r.json():
             try:
                 if ev.get("impact") != "High":

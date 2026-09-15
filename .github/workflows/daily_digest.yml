@@ -1,0 +1,40 @@
+name: Daily Digest
+
+on:
+  schedule:
+    # 10:00 Київ = 07:00 UTC (літній час, EEST, UTC+3)
+    - cron: '0 7 * * *'
+    # 10:00 Київ = 08:00 UTC (зимовий час, EET, UTC+2)
+    - cron: '0 8 * * *'
+  workflow_dispatch:  # ручний запуск для тесту
+    inputs:
+      force:
+        description: 'Надіслати негайно, ігноруючи перевірку київського часу'
+        type: boolean
+        default: true
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Python setup
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run daily digest
+        env:
+          TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          CRYPTOPANIC_KEY:  ${{ secrets.CRYPTOPANIC_KEY }}
+          FORCE_DIGEST:     ${{ github.event_name == 'workflow_dispatch' && inputs.force }}
+        run: python daily_digest.py

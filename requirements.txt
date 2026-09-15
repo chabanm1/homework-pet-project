@@ -2,3 +2,4 @@ ccxt>=4.5,<5.0
 requests>=2.32,<3.0
 pandas>=2.3,<3.0
 numpy>=2.3,<3.0
+tzdata>=2025.1
