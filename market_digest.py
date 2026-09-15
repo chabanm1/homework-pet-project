@@ -23,42 +23,54 @@ FRESH_HOURS = 1     # вікно "що нового" — під інтервал
 ECON_LOOKAHEAD_HOURS = 6   # на скільки годин вперед показувати макроподії
 
 
-def market_state(fg: int, fg_cls: str) -> str:
-    lines = ["📊 <b>СТАН РИНКУ</b>", f"F&G: {fg} ({fg_cls})", "━━━━━━━━━━━━━━━━"]
+def fetch_symbol_data(fg: int) -> list[dict]:
+    """Одне зведення OHLCV + funding + сигналів на символ — і для
+    market_state, і для opportunities, щоб не тягти дані двічі."""
+    data = []
     for sym in sn.SYMBOLS:
         df = sn.fetch_ohlcv(sym, "1h", 100)
         if df.empty:
-            lines.append(f"{sym}: немає даних")
+            data.append({"sym": sym, "ind": None})
             continue
-        ind = sn.indicators(df)
+        ind     = sn.indicators(df)
+        funding = sn.fetch_funding(sym)
+        sigs    = [s for s in sn.signals(ind, fg, funding) if s["strength"] >= sn.MIN_SIGNAL_STRENGTH]
+        data.append({"sym": sym, "ind": ind, "funding": funding, "sigs": sigs})
+    return data
+
+
+def market_state(data: list[dict], fg: int, fg_cls: str) -> str:
+    lines = ["📊 <b>СТАН РИНКУ</b>", f"F&G: {fg} ({fg_cls})", "━━━━━━━━━━━━━━━━"]
+    for d in data:
+        if d["ind"] is None:
+            lines.append(f"{d['sym']}: немає даних")
+            continue
+        ind = d["ind"]
         if ind["e7"] > ind["e25"] > ind["e99"]:
             trend = "📈 висхідний"
         elif ind["e7"] < ind["e25"] < ind["e99"]:
             trend = "📉 низхідний"
         else:
             trend = "↔️ флет"
-        coin = sym.split("/")[0]
+        coin = d["sym"].split("/")[0]
+        funding = d["funding"]
+        fund_str = f" | fund={funding*100:+.3f}%" if funding is not None else ""
         lines.append(
             f"<b>{coin}</b>: ${ind['price']:,.2f} ({ind['mom1h']:+.1f}%/1h) "
-            f"RSI={ind['rsi']:.0f} {trend} обсяг×{ind['vs']:.1f}"
+            f"RSI={ind['rsi']:.0f} {trend} обсяг×{ind['vs']:.1f}{fund_str}"
         )
     return "\n".join(lines)
 
 
-def opportunities(fg: int) -> str:
+def opportunities(data: list[dict]) -> str:
     lines = ["🎯 <b>ПОТЕНЦІЙНО ВИГІДНІ СЕТАПИ</b>", "━━━━━━━━━━━━━━━━"]
     found = False
-    for sym in sn.SYMBOLS:
-        df = sn.fetch_ohlcv(sym, "1h", 100)
-        if df.empty:
-            continue
-        ind  = sn.indicators(df)
-        sigs = [s for s in sn.signals(ind, fg) if s["strength"] >= sn.MIN_SIGNAL_STRENGTH]
-        if not sigs:
+    for d in data:
+        if d["ind"] is None or not d["sigs"]:
             continue
         found = True
-        coin = sym.split("/")[0]
-        best = max(sigs, key=lambda x: x["strength"])
+        coin = d["sym"].split("/")[0]
+        best = max(d["sigs"], key=lambda x: x["strength"])
         e = {"LONG": "🟢", "SHORT": "🔴", "MOVE": "⚡", "VOL": "👀"}.get(best["type"], "📊")
         lines.append(f"{e} <b>{coin}</b> ({best['type']}, сила={best['strength']})")
         lines.append(f"   {best['text'].splitlines()[0]}")
@@ -104,11 +116,12 @@ def main():
 
     fg, fg_cls = sn.fetch_fg()
     print(f"  F&G: {fg} ({fg_cls})")
+    data = fetch_symbol_data(fg)
 
     parts = [
         f"🕐 <b>ДАЙДЖЕСТ РИНКУ ({now_kyiv.strftime('%d.%m %H:%M')})</b>",
-        market_state(fg, fg_cls),
-        opportunities(fg),
+        market_state(data, fg, fg_cls),
+        opportunities(data),
     ]
     news_block = whats_new()
     if news_block:

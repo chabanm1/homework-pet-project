@@ -39,6 +39,7 @@ PRICE_MOVE_ALERT    = 2.5   # % за останню годину → спові�
 NEWS_HOURS_BACK     = 1.5   # шукати новини за останні N годин
 ANNOUNCE_HOURS_BACK = 24    # шукати анонси Binance за останні N годин
 ECON_HOURS_AHEAD    = 24    # шукати макроподії на найближчі N годин
+FUNDING_EXTREME     = 0.0004  # 0.04%/8h — за межею цього вважаємо funding екстремальним
 
 COOLDOWN_FILE = os.getenv("COOLDOWN_FILE", "crypto_cooldown.json")
 COOLDOWN_MIN  = 120         # хвилин між однаковими сигналами
@@ -110,6 +111,15 @@ def fetch_ohlcv(symbol: str, tf="1h", limit=100):
         return df
     except Exception as e:
         print(f"  OHLCV {symbol}: {e}"); return pd.DataFrame()
+
+def fetch_funding(symbol: str) -> float | None:
+    """Funding rate ф'ючерса (частка за 8-годинний період, напр. 0.0005 = 0.05%)."""
+    try:
+        ex = ccxt.binance({"options": {"defaultType": "future"},
+                           "enableRateLimit": True})
+        return ex.fetch_funding_rate(symbol).get("fundingRate")
+    except Exception as e:
+        print(f"  Funding {symbol}: {e}"); return None
 
 def fetch_fg() -> tuple[int, str]:
     try:
@@ -287,7 +297,7 @@ def indicators(df: pd.DataFrame) -> dict:
 # ══════════════════════════════════════════════════════════════
 # СИГНАЛИ
 # ══════════════════════════════════════════════════════════════
-def signals(ind: dict, fg: int) -> list[dict]:
+def signals(ind: dict, fg: int, funding: float | None = None) -> list[dict]:
     p, rsi, vs, bb = ind["price"], ind["rsi"], ind["vs"], ind["bb"]
     sigs = []
 
@@ -353,6 +363,17 @@ def signals(ind: dict, fg: int) -> list[dict]:
     if bb < 0.12 and rsi < 40:
         sigs.append({"type": "LONG", "strength": 6,
                      "text": f"🎯 Ціна біля нижньої BB + RSI={rsi:.0f}"})
+
+    # Екстремальний funding rate (ф'ючерси) — перегріта одна сторона ринку
+    if funding is not None:
+        if funding >= FUNDING_EXTREME:
+            sigs.append({"type": "SHORT", "strength": 6,
+                         "text": f"💸 Funding={funding*100:.3f}%/8г — лонги переплачують\n"
+                                 f"Перегрів, ризик long squeeze"})
+        elif funding <= -FUNDING_EXTREME:
+            sigs.append({"type": "LONG", "strength": 6,
+                         "text": f"💰 Funding={funding*100:.3f}%/8г — шорти переплачують\n"
+                                 f"Перегрів у шортах, contrarian LONG"})
 
     return sigs
 
@@ -439,8 +460,9 @@ def main():
         if df.empty:
             print("! немає даних"); continue
 
-        ind  = indicators(df)
-        sigs = [s for s in signals(ind, fg) if s["strength"] >= MIN_SIGNAL_STRENGTH]
+        ind     = indicators(df)
+        funding = fetch_funding(sym)
+        sigs    = [s for s in signals(ind, fg, funding) if s["strength"] >= MIN_SIGNAL_STRENGTH]
 
         if not sigs:
             print(f"сигналів немає (RSI={ind['rsi']:.0f} mov={ind['mom1h']:+.1f}%)")
