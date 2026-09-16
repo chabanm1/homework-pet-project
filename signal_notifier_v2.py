@@ -22,7 +22,9 @@ import json
 import os
 import time
 import tempfile
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
+from email.utils import parsedate_to_datetime
 from zoneinfo import ZoneInfo
 
 from chart_analysis import detect_sweep, session_levels, render_chart
@@ -32,7 +34,6 @@ from chart_analysis import detect_sweep, session_levels, render_chart
 # ══════════════════════════════════════════════════════════════
 TELEGRAM_TOKEN    = os.getenv("TELEGRAM_TOKEN", "YOUR_BOT_TOKEN")
 TELEGRAM_CHAT_ID  = os.getenv("TELEGRAM_CHAT_ID", "YOUR_CHAT_ID")
-CRYPTOPANIC_KEY   = os.getenv("CRYPTOPANIC_KEY", "")   # безкоштовно на cryptopanic.com
 
 SYMBOLS = [   # топ-20 за обсягом на Kraken (USD-пари — ліквідніші за USDT там)
     "BTC/USD", "ETH/USD", "XRP/USD", "SOL/USD", "ZEC/USD",
@@ -294,47 +295,63 @@ def fetch_fg() -> tuple[int, str]:
     except Exception:
         return 50, "Neutral"
 
+# CryptoPanic перейшов на платний API (мін. $50/тиждень, auth_token
+# обов'язковий скрізь) — перевірено живим запитом 2026-09-16, публічний
+# доступ без ключа тепер блокується Cloudflare. Замість нього — безкоштовні
+# RSS-фіди, без ключа й без лімітів.
+RSS_FEEDS = [
+    ("CoinTelegraph", "https://cointelegraph.com/rss"),
+    ("Decrypt",        "https://decrypt.co/feed"),
+]
+
+COIN_KEYWORDS = {
+    "BTC": ["bitcoin", "btc"], "ETH": ["ethereum", "eth"], "XRP": ["xrp", "ripple"],
+    "SOL": ["solana", "sol"], "ZEC": ["zcash", "zec"], "HYPE": ["hyperliquid", "hype"],
+    "ADA": ["cardano", "ada"], "TAO": ["bittensor", "tao"], "UNI": ["uniswap", "uni"],
+    "DOGE": ["dogecoin", "doge"], "NEAR": ["near protocol", "near"], "SUI": ["sui"],
+    "XLM": ["stellar", "xlm"], "LINK": ["chainlink", "link"], "XMR": ["monero", "xmr"],
+    "LTC": ["litecoin", "ltc"], "AAVE": ["aave"], "ARB": ["arbitrum", "arb"],
+    "ENA": ["ethena", "ena"], "INJ": ["injective", "inj"],
+}
+
+def _match_coins(title: str) -> list[str]:
+    t = title.lower()
+    return [c for c, kws in COIN_KEYWORDS.items() if any(k in t for k in kws)]
+
 def fetch_news(hours_back: float = NEWS_HOURS_BACK) -> list[dict]:
-    """Новини з CryptoPanic (hot + important)."""
+    """Новини з безкоштовних RSS (CoinTelegraph, Decrypt). Без community-голосів
+    CryptoPanic немає — score/pos/neg лишаються 0 (нейтрально), поки не
+    з'явиться окремий sentiment-аналіз тексту."""
     results = []
-    try:
-        params = {
-            "public":     "true",
-            "filter":     "hot",
-            "currencies": ",".join(COINS_FOR_NEWS),
-        }
-        if CRYPTOPANIC_KEY:
-            params["auth_token"] = CRYPTOPANIC_KEY
-
-        r = requests.get("https://cryptopanic.com/api/v1/posts/",
-                         params=params, timeout=10)
-        if r.status_code != 200:
-            return []
-
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours_back)
-        for item in r.json().get("results", [])[:20]:
-            try:
-                pub = datetime.fromisoformat(
-                    item["published_at"].replace("Z", "+00:00"))
-                if pub < cutoff:
-                    continue
-                votes = item.get("votes", {})
-                pos   = votes.get("positive", 0)
-                neg   = votes.get("negative", 0)
-                results.append({
-                    "title":  item.get("title", ""),
-                    "source": item.get("source", {}).get("title", ""),
-                    "url":    item.get("url", ""),
-                    "pos":    pos, "neg": neg,
-                    "score":  pos - neg,
-                    "pub":    pub.strftime("%H:%M"),
-                    "coins":  [c["code"] for c in item.get("currencies", [])],
-                })
-            except Exception:
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours_back)
+    for source, url in RSS_FEEDS:
+        try:
+            r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+            if r.status_code != 200:
+                print(f"  RSS {source}: HTTP {r.status_code}")
                 continue
-    except Exception as e:
-        print(f"  News error: {e}")
-    return sorted(results, key=lambda x: x["score"], reverse=True)
+            root = ET.fromstring(r.content)
+            for item in root.findall(".//item")[:20]:
+                try:
+                    title = (item.findtext("title") or "").strip()
+                    pub = parsedate_to_datetime(item.findtext("pubDate"))
+                    if pub.tzinfo is None:
+                        pub = pub.replace(tzinfo=timezone.utc)
+                    if pub < cutoff:
+                        continue
+                    results.append({
+                        "title":  title,
+                        "source": source,
+                        "url":    (item.findtext("link") or "").strip(),
+                        "pos": 0, "neg": 0, "score": 0,
+                        "pub":    pub.astimezone(timezone.utc).strftime("%H:%M"),
+                        "coins":  _match_coins(title),
+                    })
+                except Exception:
+                    continue
+        except Exception as e:
+            print(f"  RSS {source} error: {e}")
+    return sorted(results, key=lambda x: x["pub"], reverse=True)
 
 
 # Binance CMS catalog IDs (публічні, без ключа)
@@ -728,7 +745,7 @@ def fmt_news(news: list[dict], fg: int, fg_cls: str) -> str | None:
         if coins:
             lines.append(f"   {coins}")
         lines.append("")
-    lines.append("📱 Більше: cryptopanic.com")
+    lines.append("📱 Джерела: CoinTelegraph, Decrypt")
     return "\n".join(lines)
 
 def fmt_sweep_caption(symbol: str, sweep: dict, ind: dict) -> str:
