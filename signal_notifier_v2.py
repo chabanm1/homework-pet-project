@@ -524,10 +524,13 @@ def fetch_econ_calendar(hours_ahead: float = ECON_HOURS_AHEAD) -> list[dict]:
 # ══════════════════════════════════════════════════════════════
 def indicators(df: pd.DataFrame) -> dict:
     c, v = df["close"], df["vol"]
-    # RSI
+    # RSI — Wilder's згладжування (EMA, alpha=1/14), стандарт TradingView/бірж.
+    # Проста ковзна середня (rolling mean) давала б значення "гарячіші" за
+    # реальний ринок — сильніше реагує на недавні різкі рухи, завищуючи
+    # екстремуми перекупленості/перепроданості.
     d = c.diff()
-    g = d.clip(lower=0).rolling(14).mean()
-    l = (-d.clip(upper=0)).rolling(14).mean()
+    g = d.clip(lower=0).ewm(alpha=1/14, adjust=False).mean()
+    l = (-d.clip(upper=0)).ewm(alpha=1/14, adjust=False).mean()
     rsi = float((100 - 100/(1 + g/l.replace(0, np.nan))).iloc[-1])
     # MACD
     e12 = c.ewm(span=12, adjust=False).mean()
