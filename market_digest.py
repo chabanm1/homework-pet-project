@@ -129,7 +129,9 @@ def whats_new() -> str | None:
         lines.append("📰 <b>Новини:</b>")
         for n in news[:4]:
             sent = "🟢" if n["score"] > 0 else "🔴" if n["score"] < 0 else "⚪"
-            lines.append(f"  {sent} [{n['pub']}] {n['title'][:70]}")
+            title_uk = sn.translate_uk(n["title"])
+            lines.append(f"  {sent} [{n['pub']}] {title_uk[:140]}")
+            lines.append(f"     💡 {sn.news_impact_explain(n['title'])}")
 
     return "\n".join(lines)
 

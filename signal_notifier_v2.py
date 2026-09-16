@@ -354,6 +354,51 @@ def fetch_news(hours_back: float = NEWS_HOURS_BACK) -> list[dict]:
     return sorted(results, key=lambda x: x["pub"], reverse=True)
 
 
+def translate_uk(text: str) -> str:
+    """Безкоштовний переклад через MyMemory (без ключа, анонімний ліміт
+    ~5000 слів/день — переклад робимо лише для новин, що реально йдуть
+    в повідомлення, щоб в нього вкластись). Падає тихо — повертає оригінал,
+    краще англійський заголовок, ніж зламане повідомлення."""
+    try:
+        r = requests.get(
+            "https://api.mymemory.translated.net/get",
+            params={"q": text[:500], "langpair": "en|uk"}, timeout=8)
+        if r.status_code != 200:
+            return text
+        translated = r.json().get("responseData", {}).get("translatedText", "")
+        return translated or text
+    except Exception:
+        return text
+
+
+# Ключові слова в заголовку (англ.) -> пояснення, як це типово рухає ціну.
+# Той самий підхід, що й ECON_EXPLANATIONS для макроподій: грубе правило,
+# не аналіз конкретної новини, перший збіг виграє.
+NEWS_IMPACT_RULES = [
+    (("sec ", "cftc", "regulat", "lawsuit", " sue", "sued", "ban ", "crackdown", "investigat"),
+     "Регуляторна невизначеність — часто тисне на ціну, поки не з'ясуються деталі"),
+    (("hack", "exploit", "stolen", "breach", "drain", "malware", "vulnerabilit", "scam"),
+     "Злом/вразливість — негативно для довіри, тиск на постраждалий токен чи протокол"),
+    (("etf", "institutional", "custody", "blackrock", "fidelity", "inflow"),
+     "Інституційний інтерес/приплив капіталу — зазвичай бичачий сигнал"),
+    (("partnership", "integrat", "listing", "adopt", "launch", "mainnet", "upgrade"),
+     "Розширення використання чи технологічний прогрес — помірно бичачий сигнал"),
+    (("delist", "fraud", "outflow", "sell-off", "sell off", "dump", "liquidat", "collapse"),
+     "Негативний/продажний сигнал — тиск на ціну активу"),
+    (("rate cut", "dovish", "stimulus"),
+     "М'якша монетарна політика — бичачо для ризикових активів, включно з криптою"),
+    (("rate hike", "hawkish", "inflation"),
+     "Жорсткіша монетарна політика — тиск на ризикові активи"),
+]
+
+def news_impact_explain(title: str) -> str:
+    t = title.lower()
+    for keywords, note in NEWS_IMPACT_RULES:
+        if any(k in t for k in keywords):
+            return note
+    return "Прямого патерну не знайдено — новина не завжди напряму рухає ціну"
+
+
 # Binance CMS catalog IDs (публічні, без ключа)
 BINANCE_CATALOGS = {48: "🆕 Лістинг", 161: "⚠️ Делістинг"}
 
@@ -740,10 +785,12 @@ def fmt_news(news: list[dict], fg: int, fg_cls: str) -> str | None:
     for n in news[:4]:
         coins = " ".join(f"#{c}" for c in n["coins"][:3])
         sent  = "🟢" if n["score"] > 0 else "🔴" if n["score"] < 0 else "⚪"
+        title_uk = translate_uk(n["title"])
         lines.append(f"{sent} [{n['pub']}] <b>{n['source']}</b>")
-        lines.append(f"   {n['title'][:80]}")
+        lines.append(f"   {title_uk[:140]}")
         if coins:
             lines.append(f"   {coins}")
+        lines.append(f"   💡 {news_impact_explain(n['title'])}")
         lines.append("")
     lines.append("📱 Джерела: CoinTelegraph, Decrypt")
     return "\n".join(lines)
