@@ -21,8 +21,11 @@ import numpy as np
 import json
 import os
 import time
+import tempfile
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
+
+from chart_analysis import detect_sweep, session_levels, render_chart
 
 # ══════════════════════════════════════════════════════════════
 # КОНФІГ — через GitHub Secrets (не хардкодь в коді!)
@@ -99,6 +102,22 @@ def tg(msg: str, silent: bool = False) -> bool:
         return r.status_code == 200
     except Exception as e:
         print(f"TG error: {e}"); return False
+
+def tg_photo(path: str, caption: str) -> bool:
+    if "YOUR_BOT_TOKEN" in TELEGRAM_TOKEN:
+        print(f"[DEMO TG PHOTO] {path}\n{caption}\n")
+        return True
+    try:
+        with open(path, "rb") as f:
+            r = requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
+                data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption, "parse_mode": "HTML"},
+                files={"photo": f}, timeout=20)
+        if r.status_code != 200:
+            print(f"TG photo error: HTTP {r.status_code} {r.text[:300]}")
+        return r.status_code == 200
+    except Exception as e:
+        print(f"TG photo error: {e}"); return False
 
 
 # ══════════════════════════════════════════════════════════════
@@ -712,6 +731,19 @@ def fmt_news(news: list[dict], fg: int, fg_cls: str) -> str | None:
     lines.append("📱 Більше: cryptopanic.com")
     return "\n".join(lines)
 
+def fmt_sweep_caption(symbol: str, sweep: dict, ind: dict) -> str:
+    t = datetime.now().strftime("%H:%M")
+    e = "🟢" if sweep["type"] == "LONG" else "🔴"
+    return (
+        f"{e} <b>{symbol} — LIQUIDITY SWEEP ({t})</b>\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"{sweep['text'].capitalize()}\n"
+        f"Рівень: ${fmt_price(sweep['level'])} | Фітиль {sweep['wick_pct']*100:.0f}% свічки\n"
+        f"💰 Зараз: ${fmt_price(ind['price'])}\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"⚠️ Патерн, не гарантія — перевіряємо на реальних даних, чи дає edge"
+    )
+
 def fmt_announcement(a: dict) -> str:
     return (
         f"{a['label']} <b>Binance ({a['pub']})</b>\n"
@@ -756,6 +788,7 @@ def main():
     #      потім шлемо тільки топ-N найсильніших одним прогоном,
     #      а не окреме повідомлення на кожну з 20 монет.
     candidates = []
+    sweep_hits = []   # окремо від candidates — не змагаються за топ-5, свій ліміт/cooldown
     btc_mom1h  = None   # BTC/USD іде першим у SYMBOLS — заповнюється в першій ітерації
     for sym in SYMBOLS:
         print(f"\n  {sym}...", end=" ")
@@ -768,6 +801,10 @@ def main():
         htf_trend = fetch_trend(sym)
         if sym == "BTC/USD":
             btc_mom1h = ind["mom1h"]
+
+        sweep = detect_sweep(df)
+        if sweep:
+            sweep_hits.append({"sym": sym, "df": df, "ind": ind, "sweep": sweep})
 
         resolved = resolve_tracked(sym, ind["price"], cd)
         for r in resolved:
@@ -801,6 +838,26 @@ def main():
             mark_sent(c["key"], cd)
             track_signal(c["sym"], c["best"]["type"], c["ind"]["price"], cd, c["best"].get("rule", "OTHER"))
             sent += 1
+        time.sleep(0.3)
+
+    # ── 1.5 Liquidity sweep — окремі повідомлення з картинкою ──
+    print(f"\n  Liquidity sweeps: {len(sweep_hits)} знайдено")
+    for hit in sweep_hits[:MAX_SIGNALS_PER_RUN]:
+        sym, sweep, ind = hit["sym"], hit["sweep"], hit["ind"]
+        key = f"{sym}_SWEEP"
+        if not ok_to_send(key, cd):
+            print(f"  {sym} sweep → cooldown активний"); continue
+        try:
+            levels = session_levels(hit["df"])
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
+                render_chart(hit["df"], sym, sweep, levels, tf.name)
+                if tg_photo(tf.name, fmt_sweep_caption(sym, sweep, ind)):
+                    mark_sent(key, cd)
+                    track_signal(sym, sweep["type"], ind["price"], cd, "LIQUIDITY_SWEEP")
+                    sent += 1
+            os.unlink(tf.name)
+        except Exception as e:
+            print(f"  {sym} sweep chart error: {e}")
         time.sleep(0.3)
 
     # ── 2. Новини ────────────────────────────────────────────
