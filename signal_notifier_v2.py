@@ -848,9 +848,12 @@ def main():
         if not ok_to_send(key, cd):
             print(f"  {sym} sweep → cooldown активний"); continue
         try:
-            levels = session_levels(hit["df"])
+            chart_df = fetch_ohlcv(sym, "1h", 200)   # ширший контекст лише для монет зі sweep
+            if chart_df.empty:
+                chart_df = hit["df"]
+            levels = session_levels(chart_df)
             with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
-                render_chart(hit["df"], sym, sweep, levels, tf.name)
+                render_chart(chart_df, sym, sweep, levels, tf.name)
                 if tg_photo(tf.name, fmt_sweep_caption(sym, sweep, ind)):
                     mark_sent(key, cd)
                     track_signal(sym, sweep["type"], ind["price"], cd, "LIQUIDITY_SWEEP")

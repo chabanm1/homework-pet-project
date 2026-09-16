@@ -55,7 +55,7 @@ def detect_sweep(df: pd.DataFrame, lookback: int = SWEEP_LOOKBACK) -> dict | Non
         if wick / rng >= SWEEP_MIN_WICK_PCT:
             return {
                 "type": "SHORT", "level": float(prior_high),
-                "candle_idx": idx, "wick_pct": wick / rng,
+                "candle_idx": idx, "time": row["time"], "wick_pct": wick / rng,
                 "text": "винесли ліквідність вище недавнього хая і розвернулись вниз",
             }
 
@@ -65,7 +65,7 @@ def detect_sweep(df: pd.DataFrame, lookback: int = SWEEP_LOOKBACK) -> dict | Non
         if wick / rng >= SWEEP_MIN_WICK_PCT:
             return {
                 "type": "LONG", "level": float(prior_low),
-                "candle_idx": idx, "wick_pct": wick / rng,
+                "candle_idx": idx, "time": row["time"], "wick_pct": wick / rng,
                 "text": "винесли ліквідність нижче недавнього лоу і розвернулись вгору",
             }
 
@@ -90,11 +90,18 @@ def session_levels(df: pd.DataFrame) -> dict:
         prev_rows = d[d["date"] == dates[i - 1]]
         levels["prev_day_high"] = float(prev_rows["high"].max())
         levels["prev_day_low"]  = float(prev_rows["low"].min())
+
+    iso = d["time"].dt.isocalendar()
+    latest_year, latest_week = iso["year"].iloc[-1], iso["week"].iloc[-1]
+    week_rows = d[(iso["year"] == latest_year) & (iso["week"] == latest_week)]
+    if not week_rows.empty:
+        levels["weekly_open"] = float(week_rows.iloc[0]["open"])
+
     return levels
 
 
 def render_chart(df: pd.DataFrame, symbol: str, sweep: dict, levels: dict,
-                  out_path: str, bars: int = 60) -> str:
+                  out_path: str, bars: int = 200) -> str:
     """Малює останні `bars` 1h свічок + рівні сесій + затінену зону
     навколо рівня, який був виметений (liquidity zone)."""
     d = df.tail(bars).reset_index(drop=True)
@@ -116,12 +123,14 @@ def render_chart(df: pd.DataFrame, symbol: str, sweep: dict, levels: dict,
     ax.axhline(lvl, color="#ffb300", linestyle="--", linewidth=1.2,
                label=f"Зона ліквідності ${lvl:,.4g}")
 
-    # Sweep-свічку підсвітити
-    sweep_i_local = sweep["candle_idx"] - (len(df) - len(d))
-    if 0 <= sweep_i_local < len(d):
-        ax.axvline(sweep_i_local, color="#ffb300", linewidth=0.8, alpha=0.5)
+    # Sweep-свічку підсвітити — шукаємо за часом, бо `df` тут може бути
+    # ширшим датафреймом (більше історії), ніж той, на якому детектили sweep
+    match = d.index[d["time"] == sweep["time"]]
+    if len(match):
+        ax.axvline(match[0], color="#ffb300", linewidth=0.8, alpha=0.5)
 
     label_map = {"daily_open": ("Daily Open", "#42a5f5"),
+                 "weekly_open": ("Weekly Open", "#66bb6a"),
                  "prev_day_high": ("Prev Day High", "#ab47bc"),
                  "prev_day_low": ("Prev Day Low", "#ab47bc")}
     for key, (label, color) in label_map.items():
