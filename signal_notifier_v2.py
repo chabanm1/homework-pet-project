@@ -611,13 +611,18 @@ def signals(ind: dict, fg: int, funding: float | None = None, htf_trend: str | N
         sigs.append({"type": "SHORT", "rule": "RSI_MILD", "strength": 5,
                      "text": f"🟠 RSI={rsi:.0f} — перекупленість"})
 
-    # MACD cross
-    if ind["macd_xu"] and p > ind["e7"]:
+    # MACD cross — вимагаємо підтвердження обсягом і забороняємо вхід,
+    # якщо рух уже видихався (RSI близько до протилежної межі або ціна
+    # вже пройшла велику відстань за останню годину) — інакше заходимо
+    # на вершку/дні хвилі замість її початку.
+    if ind["macd_xu"] and p > ind["e7"] and vs > 1.0 and rsi < 65 and ind["mom1h"] < 2.0:
         sigs.append({"type": "LONG", "rule": "MACD_CROSS", "strength": 7,
-                     "text": f"📈 MACD Golden Cross + ціна вище EMA7"})
-    if ind["macd_xd"] and p < ind["e7"]:
+                     "text": f"📈 MACD Golden Cross + ціна вище EMA7\n"
+                             f"Обсяг ×{vs:.1f}"})
+    if ind["macd_xd"] and p < ind["e7"] and vs > 1.0 and rsi > 35 and ind["mom1h"] > -2.0:
         sigs.append({"type": "SHORT", "rule": "MACD_CROSS", "strength": 6,
-                     "text": f"📉 MACD Death Cross + ціна нижче EMA7"})
+                     "text": f"📉 MACD Death Cross + ціна нижче EMA7\n"
+                             f"Обсяг ×{vs:.1f}"})
 
     # EMA25 пробій
     if ind["prev"] < ind["e25"] and p > ind["e25"] and vs > 1.2:
