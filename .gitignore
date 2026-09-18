@@ -3,4 +3,5 @@ __pycache__/
 .venv/
 venv/
 crypto_cooldown.json
+signal_checks_log.jsonl
 .env
