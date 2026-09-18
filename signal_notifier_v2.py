@@ -560,11 +560,20 @@ def indicators(df: pd.DataFrame) -> dict:
     prev_c = c.shift(1)
     tr = pd.concat([h - l, (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
     atr = float(tr.rolling(14).mean().iloc[-1])
+    # Розворот підтверджений тільки якщо ціна вже відкотилась від нещодавнього
+    # хая/лоу (3 останні 1h бари), а не щойно його оновила — інакше RSI_EXTREME
+    # на SHORT ловить монету, що ще росте (був живий кейс: AAVE/HYPE/NEAR/SUI
+    # 2026-09-18, всі з RSI>75 і обсягом, але робили новий хай на останній свічці).
+    recent_high3 = float(h.tail(3).max())
+    recent_low3  = float(l.tail(3).min())
+    off_high_pct = (float(c.iloc[-1]) / recent_high3 - 1) * 100
+    off_low_pct  = (float(c.iloc[-1]) / recent_low3 - 1) * 100
     return {
         "price": float(c.iloc[-1]), "prev": float(c.iloc[-2]),
         "rsi": rsi, "macd_xu": macd_xu, "macd_xd": macd_xd,
         "e7": e7, "e25": e25, "e99": e99,
         "vs": vs, "bb": bb_pct, "mom1h": mom1h, "mom3h": mom3h, "atr": atr,
+        "off_high_pct": off_high_pct, "off_low_pct": off_low_pct,
     }
 
 
@@ -595,18 +604,28 @@ def signals(ind: dict, fg: int, funding: float | None = None, htf_trend: str | N
                      "text": f"👀 Обсяг ×{vs:.1f} від середнього {d}\n"
                              f"Великі гравці активні!"})
 
-    # RSI extreme + об'єм
+    # RSI extreme + об'єм. "Розворот підтверджено" = ціна вже відкотилась від
+    # свого 3-барного хая/лоу, а не щойно його оновила — інакше це не топ/дно,
+    # а монета, що ще триває в русі (не заходити "на вершку хвилі").
+    REVERSAL_CONFIRM_PCT = 0.15
+    bottom_confirmed = ind["off_low_pct"] >= REVERSAL_CONFIRM_PCT
+    top_confirmed = ind["off_high_pct"] <= -REVERSAL_CONFIRM_PCT
+
     if rsi < 28 and vs > 1.3:
-        sigs.append({"type": "LONG", "rule": "RSI_EXTREME", "strength": 9,
+        sigs.append({"type": "LONG", "rule": "RSI_EXTREME",
+                     "strength": 9 if bottom_confirmed else 5,
                      "text": f"🟢 RSI={rsi:.0f} — сильна перепроданість\n"
-                             f"+ підвищений обсяг ×{vs:.1f}"})
+                             f"+ підвищений обсяг ×{vs:.1f}"
+                             + ("" if bottom_confirmed else "\n⚠️ ціна ще на свіжому лої — розворот не підтверджений")})
     elif rsi < 35:
         sigs.append({"type": "LONG", "rule": "RSI_MILD", "strength": 5,
                      "text": f"🟡 RSI={rsi:.0f} — перепроданість"})
     elif rsi > 72 and vs > 1.3:
-        sigs.append({"type": "SHORT", "rule": "RSI_EXTREME", "strength": 8,
+        sigs.append({"type": "SHORT", "rule": "RSI_EXTREME",
+                     "strength": 8 if top_confirmed else 5,
                      "text": f"🔴 RSI={rsi:.0f} — сильна перекупленість\n"
-                             f"+ обсяг ×{vs:.1f}"})
+                             f"+ обсяг ×{vs:.1f}"
+                             + ("" if top_confirmed else "\n⚠️ ціна ще на свіжому хаї — розворот не підтверджений")})
     elif rsi > 68:
         sigs.append({"type": "SHORT", "rule": "RSI_MILD", "strength": 5,
                      "text": f"🟠 RSI={rsi:.0f} — перекупленість"})
