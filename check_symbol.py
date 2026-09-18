@@ -34,12 +34,14 @@ LOG_FILE = "signal_checks_log.jsonl"
 
 
 def strength_to_tier(strength: int) -> tuple[str, str]:
-    """Груба якісна категорія, НЕ виміряна ймовірність."""
+    """Груба якісна категорія, НЕ виміряна ймовірність. % рахує та сама
+    strength_pct(), що вставляється в реальні Telegram-повідомлення бота."""
+    pct = bot.strength_pct(strength)
     if strength >= bot.STRONG_STRENGTH:
-        return "~65-70%", "СИЛЬНИЙ (заходь / готовий сетап)"
+        return pct, "СИЛЬНИЙ (заходь / готовий сетап)"
     if strength >= bot.MEDIUM_STRENGTH:
-        return "~50-55%", "СЕРЕДНІЙ (чекай підтвердження)"
-    return "<45%", "СЛАБКИЙ (не заходити)"
+        return pct, "СЕРЕДНІЙ (чекай підтвердження)"
+    return pct, "СЛАБКИЙ (не заходити)"
 
 
 def main():

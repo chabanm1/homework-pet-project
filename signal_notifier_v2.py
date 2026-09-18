@@ -727,6 +727,16 @@ def signals(ind: dict, fg: int, funding: float | None = None, htf_trend: str | N
 # ══════════════════════════════════════════════════════════════
 # ФОРМАТУВАННЯ ПОВІДОМЛЕНЬ
 # ══════════════════════════════════════════════════════════════
+def strength_pct(strength: int) -> str:
+    """Груба якісна категорія за шкалою сили (1-10), НЕ виміряний
+    історичний win-rate (той рахує rule_win_rate() окремо, коли є дані)."""
+    if strength >= STRONG_STRENGTH:
+        return "~65-70%"
+    if strength >= MEDIUM_STRENGTH:
+        return "~50-55%"
+    return "<45%"
+
+
 def tp_sl(price: float, atr: float, sig_type: str) -> tuple[float, float]:
     """SL/TP на основі ATR(14). Груба евристика, не фінансова порада."""
     if sig_type == "LONG":
@@ -742,22 +752,24 @@ def advice_block(sig: dict, ind: dict) -> str:
     action = "BUY / LONG" if sig["type"] == "LONG" else "SELL / SHORT"
     strength = sig["strength"]
 
+    pct = strength_pct(strength)
     if strength >= STRONG_STRENGTH:
         sl, tp = tp_sl(price, atr, sig["type"])
         return (
-            f"\n🎯 <b>ПОРАДА: СИЛЬНИЙ — заходь зараз {action}</b>\n"
-            f"SL: ${fmt_price(sl)} | TP: ${fmt_price(tp)}"
+            f"\n🎯 <b>ПОРАДА: СИЛЬНИЙ ({pct}) — заходь зараз {action}</b>\n"
+            f"SL: ${fmt_price(sl)} | TP: ${fmt_price(tp)}\n"
+            f"<i>% — груба оцінка за силою сигналу, не бектест</i>"
         )
     if strength >= MEDIUM_STRENGTH:
         trig = price + ATR_TRIGGER_MULT * atr if sig["type"] == "LONG" else price - ATR_TRIGGER_MULT * atr
         sl, tp = tp_sl(trig, atr, sig["type"])
         move = "підніметься" if sig["type"] == "LONG" else "опуститься"
         return (
-            f"\n🟡 <b>ПОРАДА: СЕРЕДНІЙ — чекай підтвердження</b>\n"
+            f"\n🟡 <b>ПОРАДА: СЕРЕДНІЙ ({pct}) — чекай підтвердження</b>\n"
             f"Якщо ціна {move} до ${fmt_price(trig)} → {action}\n"
             f"SL: ${fmt_price(sl)} | TP: ${fmt_price(tp)}"
         )
-    return "\n⚪ <b>ПОРАДА: СЛАБКИЙ — краще не рухатись, просто тримай на радарі</b>"
+    return f"\n⚪ <b>ПОРАДА: СЛАБКИЙ ({pct}) — краще не рухатись, просто тримай на радарі</b>"
 
 def compact_advice(sig: dict, ind: dict) -> str:
     """Однорядкова версія advice_block — для дайджесту з багатьма монетами."""
@@ -766,13 +778,14 @@ def compact_advice(sig: dict, ind: dict) -> str:
     price, atr = ind["price"], ind["atr"]
     action = "BUY" if sig["type"] == "LONG" else "SELL"
     strength = sig["strength"]
+    pct = strength_pct(strength)
     if strength >= STRONG_STRENGTH:
         sl, tp = tp_sl(price, atr, sig["type"])
-        return f"   → {action} зараз | SL ${fmt_price(sl)} TP ${fmt_price(tp)}"
+        return f"   → {action} зараз ({pct}) | SL ${fmt_price(sl)} TP ${fmt_price(tp)}"
     if strength >= MEDIUM_STRENGTH:
         trig = price + ATR_TRIGGER_MULT * atr if sig["type"] == "LONG" else price - ATR_TRIGGER_MULT * atr
-        return f"   → чекай ${fmt_price(trig)} → {action}"
-    return "   → краще не рухайся"
+        return f"   → чекай ${fmt_price(trig)} → {action} ({pct})"
+    return f"   → краще не рухайся ({pct})"
 
 def nearby_econ_note(econ: list[dict], hours: float = 8) -> str:
     """Коротке нагадування про макроподію, якщо вона зовсім скоро —
