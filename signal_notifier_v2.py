@@ -47,6 +47,7 @@ COINS_FOR_NEWS = [s.split("/")[0] for s in SYMBOLS]   # для фільтрац�
 MIN_SIGNAL_STRENGTH  = 3    # 1-10, рекомендую 3
 MAX_SIGNALS_PER_RUN  = 5    # топ-N за силою — щоб 20 монет не слали 20 окремих алертів
 PRICE_MOVE_ALERT    = 2.5   # % за останню годину → сповіщення
+MARKET_WIDE_SWEEP_MIN = 3   # мінімум монет з liquidity sweep в один бік за один прогін, щоб рахувати це ринковою хвилею, а не рухом однієї монети
 NEWS_HOURS_BACK     = 1.5   # шукати новини за останні N годин
 ANNOUNCE_HOURS_BACK = 24    # шукати анонси Binance за останні N годин
 ECON_HOURS_AHEAD    = 24    # шукати макроподії на найближчі N годин
@@ -727,9 +728,16 @@ def signals(ind: dict, fg: int, funding: float | None = None, htf_trend: str | N
 # ══════════════════════════════════════════════════════════════
 # ФОРМАТУВАННЯ ПОВІДОМЛЕНЬ
 # ══════════════════════════════════════════════════════════════
-def strength_pct(strength: int) -> str:
-    """Груба якісна категорія за шкалою сили (1-10), НЕ виміряний
-    історичний win-rate (той рахує rule_win_rate() окремо, коли є дані)."""
+def strength_pct(strength: int, rule: str | None = None, cd: dict | None = None) -> str:
+    """Якщо для цього типу правила вже є досить накопиченої історії
+    (rule_win_rate — 15+ вирішених за 14д), показуємо РЕАЛЬНИЙ виміряний
+    win-rate замість вигаданої вилки — інакше цифра в повідомленні може
+    показувати "~65-70%" на типі сигналу, що прямо зараз програє в живу.
+    Без досить даних — груба якісна категорія за шкалою сили (1-10)."""
+    if rule is not None and cd is not None:
+        wr = rule_win_rate(cd, rule)
+        if wr is not None:
+            return f"~{wr:.0f}% (виміряно)"
     if strength >= STRONG_STRENGTH:
         return "~65-70%"
     if strength >= MEDIUM_STRENGTH:
@@ -743,7 +751,7 @@ def tp_sl(price: float, atr: float, sig_type: str) -> tuple[float, float]:
         return price - ATR_SL_MULT * atr, price + ATR_TP_MULT * atr
     return price + ATR_SL_MULT * atr, price - ATR_TP_MULT * atr
 
-def advice_block(sig: dict, ind: dict) -> str:
+def advice_block(sig: dict, ind: dict, cd: dict | None = None) -> str:
     """Порада за силою сигналу: сильний → заходь зараз з TP/SL,
     середній → чекай підтвердження на рівні, слабкий → не рухайся."""
     if sig["type"] not in ("LONG", "SHORT") or not ind.get("atr"):
@@ -752,13 +760,13 @@ def advice_block(sig: dict, ind: dict) -> str:
     action = "BUY / LONG" if sig["type"] == "LONG" else "SELL / SHORT"
     strength = sig["strength"]
 
-    pct = strength_pct(strength)
+    pct = strength_pct(strength, sig.get("rule"), cd)
     if strength >= STRONG_STRENGTH:
         sl, tp = tp_sl(price, atr, sig["type"])
         return (
             f"\n🎯 <b>ПОРАДА: СИЛЬНИЙ ({pct}) — заходь зараз {action}</b>\n"
             f"SL: ${fmt_price(sl)} | TP: ${fmt_price(tp)}\n"
-            f"<i>% — груба оцінка за силою сигналу, не бектест</i>"
+            f"<i>{'% — реальний win-rate цього типу за 14д' if '(виміряно)' in pct else '% — груба оцінка за силою сигналу, не бектест'}</i>"
         )
     if strength >= MEDIUM_STRENGTH:
         trig = price + ATR_TRIGGER_MULT * atr if sig["type"] == "LONG" else price - ATR_TRIGGER_MULT * atr
@@ -771,14 +779,14 @@ def advice_block(sig: dict, ind: dict) -> str:
         )
     return f"\n⚪ <b>ПОРАДА: СЛАБКИЙ ({pct}) — краще не рухатись, просто тримай на радарі</b>"
 
-def compact_advice(sig: dict, ind: dict) -> str:
+def compact_advice(sig: dict, ind: dict, cd: dict | None = None) -> str:
     """Однорядкова версія advice_block — для дайджесту з багатьма монетами."""
     if sig["type"] not in ("LONG", "SHORT") or not ind.get("atr"):
         return ""
     price, atr = ind["price"], ind["atr"]
     action = "BUY" if sig["type"] == "LONG" else "SELL"
     strength = sig["strength"]
-    pct = strength_pct(strength)
+    pct = strength_pct(strength, sig.get("rule"), cd)
     if strength >= STRONG_STRENGTH:
         sl, tp = tp_sl(price, atr, sig["type"])
         return f"   → {action} зараз ({pct}) | SL ${fmt_price(sl)} TP ${fmt_price(tp)}"
@@ -797,7 +805,7 @@ def nearby_econ_note(econ: list[dict], hours: float = 8) -> str:
     return "\n".join(lines)
 
 def fmt_signal(symbol: str, ind: dict, fg: int, fg_cls: str,
-               sig: dict, econ: list[dict] | None = None) -> str:
+               sig: dict, econ: list[dict] | None = None, cd: dict | None = None) -> str:
     t = datetime.now().strftime("%H:%M")
     e = {"LONG":"🟢","SHORT":"🔴","MOVE":"⚡","VOL":"👀"}.get(sig["type"],"📊")
     return (
@@ -810,7 +818,7 @@ def fmt_signal(symbol: str, ind: dict, fg: int, fg_cls: str,
         f"📉 EMA7=${fmt_price(ind['e7'])} | EMA25=${fmt_price(ind['e25'])}\n"
         f"📦 Обсяг ×{ind['vs']:.1f}\n"
         f"━━━━━━━━━━━━━━━━"
-        f"{advice_block(sig, ind)}"
+        f"{advice_block(sig, ind, cd)}"
         f"{nearby_econ_note(econ or [])}\n"
         f"⚠️ Евристика на основі ATR, не фінансова порада"
     )
@@ -847,6 +855,29 @@ def fmt_sweep_caption(symbol: str, sweep: dict, ind: dict) -> str:
         f"━━━━━━━━━━━━━━━━\n"
         f"⚠️ Патерн, не гарантія — перевіряємо на реальних даних, чи дає edge"
     )
+
+def fmt_market_wide_alert(hits: list[dict], direction: str) -> str:
+    """Кілька монет одночасно дали liquidity sweep в один бік за один прогін —
+    сильніший сигнал, ніж sweep по одній монеті, бо менше шансів, що це шум
+    конкретної монети, а не загальна ринкова хвиля."""
+    e = "🔴" if direction == "SHORT" else "🟢"
+    word = "ВНИЗ" if direction == "SHORT" else "ВГОРУ"
+    lines = [
+        f"{e} <b>MARKET-WIDE SWEEP — {len(hits)} монет одночасно ({word})</b>",
+        "━━━━━━━━━━━━━━━━",
+    ]
+    for h in sorted(hits, key=lambda x: -x["sweep"]["wick_pct"]):
+        sym, sweep, ind = h["sym"], h["sweep"], h["ind"]
+        lines.append(
+            f"• <b>{sym}</b>: ${fmt_price(sweep['level'])} → ${fmt_price(ind['price'])} "
+            f"(фітиль {sweep['wick_pct']*100:.0f}%)"
+        )
+    lines += [
+        "━━━━━━━━━━━━━━━━",
+        "⚠️ Кілька монет одночасно — це вже схоже на ринкову хвилю, а не рух окремої монети. "
+        "Патерн, не гарантія — перевіряємо на реальних даних, чи дає edge",
+    ]
+    return "\n".join(lines)
 
 def fmt_announcement(a: dict) -> str:
     return (
@@ -937,7 +968,7 @@ def main():
         print(f"\n  {len(candidates) - len(top)} сигналів не потрапили в топ-{MAX_SIGNALS_PER_RUN}, пропущено цей прогін")
 
     for c in top:
-        msg = fmt_signal(c["sym"], c["ind"], fg, fg_cls, c["best"], econ)
+        msg = fmt_signal(c["sym"], c["ind"], fg, fg_cls, c["best"], econ, cd)
         if tg(msg):
             mark_sent(c["key"], cd)
             track_signal(c["sym"], c["best"]["type"], c["ind"]["price"], cd, c["best"].get("rule", "OTHER"))
@@ -966,6 +997,20 @@ def main():
         except Exception as e:
             print(f"  {sym} sweep chart error: {e}")
         time.sleep(0.3)
+
+    # ── 1.6 Market-wide sweep — коли кілька монет одночасно дають sweep
+    #       в один бік, це швидше ринкова хвиля, ніж рух окремої монети
+    for direction in ("SHORT", "LONG"):
+        dir_hits = [h for h in sweep_hits if h["sweep"]["type"] == direction]
+        if len(dir_hits) < MARKET_WIDE_SWEEP_MIN:
+            continue
+        key = f"MARKET_WIDE_SWEEP_{direction}"
+        if not ok_to_send(key, cd):
+            print(f"  Market-wide {direction} sweep ({len(dir_hits)} монет) → cooldown активний")
+            continue
+        if tg(fmt_market_wide_alert(dir_hits, direction)):
+            mark_sent(key, cd)
+            sent += 1
 
     # ── 2. Новини ────────────────────────────────────────────
     print(f"\n  Новини...", end=" ")

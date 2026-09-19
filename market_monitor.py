@@ -56,9 +56,9 @@ def main():
     else:
         log_batch = []
         for sym, ind, trend, best in actionable:
-            pct, tier = strength_to_tier(best["strength"])
+            pct, tier = strength_to_tier(best["strength"], best.get("rule"), cd)
             wr = bot.rule_win_rate(cd, best.get("rule", "OTHER"))
-            wr_txt = f"{wr*100:.0f}% (14d)" if wr is not None else "н/д"
+            wr_txt = f"{wr:.0f}% (14d)" if wr is not None else "н/д"
             mark = "🟢" if best["type"] == "LONG" else "🔴"
             print(
                 f"{mark} {sym:<10} {best['type']:<6} [{best['rule']}] сила={best['strength']}  "

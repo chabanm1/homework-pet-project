@@ -72,7 +72,7 @@ def market_state(data: list[dict], fg: int, fg_cls: str) -> str:
 
 MAX_OPPORTUNITIES = 8   # топ-20 монет може дати забагато сетапів для одного Telegram-повідомлення
 
-def opportunities(data: list[dict]) -> str:
+def opportunities(data: list[dict], cd: dict | None = None) -> str:
     lines = ["🎯 <b>ПОТЕНЦІЙНО ВИГІДНІ СЕТАПИ</b>", "━━━━━━━━━━━━━━━━"]
     candidates = []
     for d in data:
@@ -91,7 +91,7 @@ def opportunities(data: list[dict]) -> str:
         e = {"LONG": "🟢", "SHORT": "🔴", "MOVE": "⚡", "VOL": "👀"}.get(best["type"], "📊")
         lines.append(f"{e} <b>{coin}</b> ({best['type']}, сила={best['strength']})")
         lines.append(f"   {best['text'].splitlines()[0]}")
-        advice = sn.compact_advice(best, d["ind"])
+        advice = sn.compact_advice(best, d["ind"], cd)
         if advice:
             lines.append(advice)
 
@@ -184,7 +184,7 @@ def main():
     parts = [
         f"🕐 <b>ДАЙДЖЕСТ РИНКУ ({now_kyiv.strftime('%d.%m %H:%M')})</b>",
         market_state(data, fg, fg_cls),
-        opportunities(data),
+        opportunities(data, cd),
     ]
     perf_block = performance(cd)
     if perf_block:

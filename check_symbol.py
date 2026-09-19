@@ -33,10 +33,12 @@ KYIV = ZoneInfo("Europe/Kyiv")
 LOG_FILE = "signal_checks_log.jsonl"
 
 
-def strength_to_tier(strength: int) -> tuple[str, str]:
-    """Груба якісна категорія, НЕ виміряна ймовірність. % рахує та сама
-    strength_pct(), що вставляється в реальні Telegram-повідомлення бота."""
-    pct = bot.strength_pct(strength)
+def strength_to_tier(strength: int, rule: str | None = None, cd: dict | None = None) -> tuple[str, str]:
+    """Груба якісна категорія, НЕ виміряна ймовірність (якщо для rule вже є
+    досить накопиченої історії — strength_pct() підставить реальний win-rate
+    замість вигаданої вилки). % рахує та сама strength_pct(), що вставляється
+    в реальні Telegram-повідомлення бота."""
+    pct = bot.strength_pct(strength, rule, cd)
     if strength >= bot.STRONG_STRENGTH:
         return pct, "СИЛЬНИЙ (заходь / готовий сетап)"
     if strength >= bot.MEDIUM_STRENGTH:
@@ -70,15 +72,15 @@ def main():
     logged = []
 
     for s in sorted(sigs, key=lambda x: -x["strength"]):
-        pct, tier = strength_to_tier(s["strength"]) if s["type"] in ("LONG", "SHORT") else (None, None)
+        pct, tier = strength_to_tier(s["strength"], s.get("rule"), cd) if s["type"] in ("LONG", "SHORT") else (None, None)
         print(f"\n[{s['rule']}] {s['type']}  сила={s['strength']}")
         print("  " + s["text"].replace("\n", "\n  "))
         if pct:
-            print(f"  Оцінка (не бектест): {pct} — {tier}")
+            print(f"  Оцінка: {pct} — {tier}")
 
         wr = bot.rule_win_rate(cd, s.get("rule", "OTHER"))
         if wr is not None:
-            print(f"  Реальний win-rate правила ({s['rule']}, 14d): {wr*100:.0f}%")
+            print(f"  Реальний win-rate правила ({s['rule']}, 14d): {wr:.0f}%")
         else:
             print(f"  Реальний win-rate правила ({s['rule']}): н/д (недостатньо даних локально)")
 
