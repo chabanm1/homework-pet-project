@@ -157,21 +157,61 @@ def mark_seen(key: str, cd: dict):
 # ══════════════════════════════════════════════════════════════
 # ТРЕКІНГ ЕФЕКТИВНОСТІ СИГНАЛІВ
 # ══════════════════════════════════════════════════════════════
-def track_signal(sym: str, sig_type: str, price: float, cd: dict, rule: str = "OTHER"):
+def track_signal(sym: str, sig_type: str, price: float, cd: dict, rule: str = "OTHER",
+                 atr: float | None = None, strength: int | None = None, trend: str | None = None):
     """Запам'ятовує LONG/SHORT сигнал, щоб через TRACK_HOURS перевірити,
-    чи ціна реально пішла в передбачений бік."""
+    чи ціна реально пішла в передбачений бік. Якщо відомий ATR — додатково
+    зберігаємо SL/TP бота, щоб на перевірці дивитись, що зачепила ціна першим."""
     if sig_type not in ("LONG", "SHORT"):
         return   # MOVE/VOL не є направленою ставкою — нема що звіряти
     track = cd.setdefault("_track", [])
-    track.append({
+    rec = {
         "sym": sym, "type": sig_type, "rule": rule, "price0": price,
         "ts": time.time(), "check_at": time.time() + TRACK_HOURS * 3600,
         "resolved": False,
-    })
+    }
+    if atr:
+        rec["sl"], rec["tp"] = tp_sl(price, atr, sig_type)
+    if strength is not None:
+        rec["strength"] = strength
+    if trend:
+        rec["trend"] = trend
+    track.append(rec)
     del track[:-TRACK_CAP]
 
-def resolve_tracked(sym: str, price_now: float, cd: dict) -> list[dict]:
-    """Дорізає результат по записах цього символу, час перевірки яких настав."""
+def _path_outcome(rec: dict, df: pd.DataFrame) -> tuple[str | None, float | None]:
+    """Що зачепила ціна першим між входом і check_at на 1h-барах df: 'tp'/'sl'/'both'/'time',
+    та рух у бік сигналу в одиницях ризику (1R = відстань до SL). Якщо в записі
+    нема SL/TP або барів для перевірки нема — (None, None). Бар, у якому відбувся вхід,
+    не враховуємо (його high/low частково передують входу)."""
+    if "sl" not in rec or "tp" not in rec or df is None or df.empty:
+        return None, None
+    entry, sl, tp, d = rec["price0"], rec["sl"], rec["tp"], rec["type"]
+    risk = abs(entry - sl)
+    if risk <= 0:
+        return None, None
+    start_ms, end_ms = rec["ts"] * 1000, rec["check_at"] * 1000
+    bars = df[(df["ts"] >= start_ms) & (df["ts"] + 3600_000 <= end_ms)]   # бари, що повністю в вікні
+    if bars.empty:
+        return None, None
+    for row in bars.itertuples():
+        hs = (row.low <= sl) if d == "LONG" else (row.high >= sl)
+        ht = (row.high >= tp) if d == "LONG" else (row.low <= tp)
+        if hs and ht:
+            return "both", -1.0     # у межах одного бару порядок невідомий — песимістично SL
+        if hs:
+            return "sl", -1.0
+        if ht:
+            return "tp", abs(tp - entry) / risk
+    last = float(bars["close"].iloc[-1])
+    r = (last - entry) / risk if d == "LONG" else (entry - last) / risk
+    return "time", r
+
+def resolve_tracked(sym: str, price_now: float, cd: dict, df: pd.DataFrame | None = None) -> list[dict]:
+    """Дорізає результат по записах цього символу, час перевірки яких настав.
+    win/loss/flat (±TRACK_WIN_PCT на price_now) НЕ змінюємо — на ньому тримається
+    самонавчання правил. Додатково, якщо є df з 1h-барами і в записі є SL/TP,
+    рахуємо `hit` (tp/sl/both/time) і `r` (рух у бік сигналу в R)."""
     resolved = []
     now = time.time()
     for rec in cd.get("_track", []):
@@ -183,22 +223,56 @@ def resolve_tracked(sym: str, price_now: float, cd: dict) -> list[dict]:
         rec["resolved"] = True
         rec["pct"]      = pct
         rec["outcome"]  = "win" if hit else ("loss" if miss else "flat")
+        try:
+            path, r = _path_outcome(rec, df)
+        except Exception as e:      # додаткова метрика не повинна ламати основний трекінг
+            print(f"  [track] path {sym}: {e}"); path, r = None, None
+        if path:
+            rec["hit"], rec["r"] = path, r
         resolved.append(rec)
     return resolved
 
+def _signed(rec: dict) -> float:
+    """Рух ціни за перевірку В БІК сигналу: для LONG = pct, для SHORT = -pct."""
+    return rec["pct"] if rec["type"] == "LONG" else -rec["pct"]
+
 def signal_stats(cd: dict, days: float = 7) -> dict:
-    """Win-rate по вирішених сигналах за останні `days` днів."""
+    """Win-rate по вирішених сигналах за останні `days` днів.
+    avg_pct — середній рух У БІК сигналу (SHORT, після якого ціна впала на 1%, дає +1%);
+    avg_raw_pct — сирий рух ціни без урахування напрямку (= дрейф ринку за ті ж вікна)."""
     cutoff = time.time() - days * 86400
     recs = [r for r in cd.get("_track", []) if r.get("resolved") and r["ts"] >= cutoff]
     wins  = sum(1 for r in recs if r["outcome"] == "win")
     losses = sum(1 for r in recs if r["outcome"] == "loss")
     flats  = sum(1 for r in recs if r["outcome"] == "flat")
     decided = wins + losses
+    with_r = [r for r in recs if r.get("r") is not None]
     return {
         "total": len(recs), "wins": wins, "losses": losses, "flats": flats,
         "win_rate": (wins / decided * 100) if decided else None,
-        "avg_pct": (sum(r["pct"] for r in recs) / len(recs)) if recs else None,
+        "avg_pct": (sum(_signed(r) for r in recs) / len(recs)) if recs else None,
+        "avg_raw_pct": (sum(r["pct"] for r in recs) / len(recs)) if recs else None,
+        "r_n": len(with_r),
+        "avg_r": (sum(r["r"] for r in with_r) / len(with_r)) if with_r else None,
+        "tp_hits": sum(1 for r in with_r if r["hit"] == "tp"),
+        "sl_hits": sum(1 for r in with_r if r["hit"] in ("sl", "both")),
     }
+
+def signal_stats_by_dir(cd: dict, days: float = 7) -> dict:
+    """Те саме по напрямках: {'LONG': {...}, 'SHORT': {...}}. Показує, чи не тягне
+    загальну цифру один напрямок (напр. шорти проти дрейфу вгору)."""
+    cutoff = time.time() - days * 86400
+    out = {}
+    for d in ("LONG", "SHORT"):
+        recs = [r for r in cd.get("_track", []) if r.get("resolved") and r["ts"] >= cutoff and r["type"] == d]
+        wins = sum(1 for r in recs if r["outcome"] == "win")
+        losses = sum(1 for r in recs if r["outcome"] == "loss")
+        out[d] = {
+            "total": len(recs), "wins": wins, "losses": losses,
+            "win_rate": (wins / (wins + losses) * 100) if wins + losses else None,
+            "avg_pct": (sum(_signed(r) for r in recs) / len(recs)) if recs else None,
+        }
+    return out
 
 def signal_stats_by_rule(cd: dict, days: float = 1, min_n: int = 3) -> list[dict]:
     """Win-rate окремо по кожному типу правила (RSI_EXTREME, EMA25_BREAK, ...).
@@ -956,7 +1030,7 @@ def main():
         if sweep:
             sweep_hits.append({"sym": sym, "df": df, "ind": ind, "sweep": sweep})
 
-        resolved = resolve_tracked(sym, ind["price"], cd)
+        resolved = resolve_tracked(sym, ind["price"], cd, df)
         for r in resolved:
             e = {"win": "✅", "loss": "❌", "flat": "➖"}[r["outcome"]]
             print(f"  [track] {r['type']} {sym} {r['pct']:+.2f}% {e}")
@@ -975,7 +1049,7 @@ def main():
         if not ok_to_send(key, cd):
             print(f"  → cooldown активний"); continue
 
-        candidates.append({"sym": sym, "ind": ind, "best": best, "key": key})
+        candidates.append({"sym": sym, "ind": ind, "best": best, "key": key, "trend": htf_trend})
 
     candidates.sort(key=lambda c: c["best"]["strength"], reverse=True)
     top = candidates[:MAX_SIGNALS_PER_RUN]
@@ -986,7 +1060,8 @@ def main():
         msg = fmt_signal(c["sym"], c["ind"], fg, fg_cls, c["best"], econ, cd)
         if tg(msg):
             mark_sent(c["key"], cd)
-            track_signal(c["sym"], c["best"]["type"], c["ind"]["price"], cd, c["best"].get("rule", "OTHER"))
+            track_signal(c["sym"], c["best"]["type"], c["ind"]["price"], cd, c["best"].get("rule", "OTHER"),
+                         atr=c["ind"].get("atr"), strength=c["best"]["strength"], trend=c.get("trend"))
             sent += 1
         time.sleep(0.3)
 
@@ -1010,7 +1085,7 @@ def main():
                 if tg_photo(tf.name, fmt_sweep_caption(sym, sweep, ind)):
                     mark_sent(key, cd)
                     mark_seen(seen_key, cd)
-                    track_signal(sym, sweep["type"], ind["price"], cd, "LIQUIDITY_SWEEP")
+                    track_signal(sym, sweep["type"], ind["price"], cd, "LIQUIDITY_SWEEP", atr=ind.get("atr"))
                     sent += 1
             os.unlink(tf.name)
         except Exception as e:

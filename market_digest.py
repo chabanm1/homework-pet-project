@@ -140,7 +140,7 @@ RULE_NAMES = {
     "RSI_EXTREME": "RSI екстремум", "RSI_MILD": "RSI помірний",
     "MACD_CROSS": "MACD cross", "EMA25_BREAK": "Пробій EMA25",
     "FG_EXTREME": "F&G екстремум", "BB_LOWER": "Нижня BB",
-    "FUNDING_EXTREME": "Funding екстремум", "OTHER": "Інше",
+    "FUNDING_EXTREME": "Funding екстремум", "LIQUIDITY_SWEEP": "Liquidity sweep", "OTHER": "Інше",
 }
 
 def performance(cd: dict) -> str | None:
@@ -149,11 +149,24 @@ def performance(cd: dict) -> str | None:
         return None
     lines = ["📈 <b>ТОЧНІСТЬ СИГНАЛІВ (7 днів)</b>", "━━━━━━━━━━━━━━━━"]
     if stats["win_rate"] is not None:
-        lines.append(f"Win-rate: {stats['win_rate']:.0f}% ({stats['wins']}W/{stats['losses']}L, {stats['flats']} flat)")
+        decided = stats["wins"] + stats["losses"]
+        moe = 196 * (stats["win_rate"] / 100 * (1 - stats["win_rate"] / 100) / decided) ** 0.5   # 95% похибка, п.п.
+        lines.append(f"Win-rate: {stats['win_rate']:.0f}% ±{moe:.0f} ({stats['wins']}W/{stats['losses']}L, {stats['flats']} flat)")
+        lines.append("<i>≈50% ±похибка = монетка; ±0.3%/4г — груба міра, не прибуток</i>")
     else:
         lines.append(f"{stats['flats']} flat, ще недостатньо вирішених сигналів")
     if stats["avg_pct"] is not None:
-        lines.append(f"Середній рух: {stats['avg_pct']:+.2f}%")
+        lines.append(f"Рух у бік сигналу: {stats['avg_pct']:+.2f}% "
+                     f"(дрейф ринку в ті ж вікна: {stats['avg_raw_pct']:+.2f}%)")
+    by_dir = sn.signal_stats_by_dir(cd, days=7)
+    for d in ("LONG", "SHORT"):
+        x = by_dir[d]
+        if x["total"]:
+            wr = f"{x['win_rate']:.0f}%" if x["win_rate"] is not None else "н/д"
+            lines.append(f"  {d}: {x['total']} сигн., win-rate {wr}, рух {x['avg_pct']:+.2f}%")
+    if stats["r_n"] >= 10:
+        lines.append(f"У R (1R = відстань до SL): середнє {stats['avg_r']:+.2f} | "
+                     f"TP зачеплено {stats['tp_hits']}, SL {stats['sl_hits']} з {stats['r_n']}")
 
     today = sn.signal_stats_by_rule(cd, days=1)
     if today:
