@@ -5,3 +5,4 @@ venv/
 crypto_cooldown.json
 signal_checks_log.jsonl
 .env
+backtest/bt_data/
