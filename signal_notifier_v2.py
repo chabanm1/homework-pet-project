@@ -545,8 +545,11 @@ def indicators(df: pd.DataFrame) -> dict:
     e25 = float(c.ewm(span=25, adjust=False).mean().iloc[-1])
     e99 = float(c.ewm(span=99, adjust=False).mean().iloc[-1])
     # Volume
-    vm  = float(v.rolling(20).mean().iloc[-1])
-    vs  = float(v.iloc[-1]) / vm if vm > 0 else 1.0
+    # Беремо останню ЗАКРИТУ свічку (iloc[-2]) проти середнього 20 закритих до неї:
+    # iloc[-1] — свічка, що ще формується, і на запуску о :00 її обсяг ≈ 0
+    # (в дайджесті всі монети показували ×0.0), що глушило всі правила з vs>…
+    vm  = float(v.iloc[-22:-2].mean())
+    vs  = float(v.iloc[-2]) / vm if vm > 0 else 1.0
     # BB
     m20 = c.rolling(20).mean()
     s20 = c.rolling(20).std()
