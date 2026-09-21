@@ -8,7 +8,7 @@ LIQUIDITY SWEEP DETECTOR + CHART SNAPSHOT
 стопів), потім різко розвертається назад — свічка з довгим фітилем і
 закриттям всередину діапазону. Це рахований патерн, а не "на око".
 
-detect_sweep()   — знаходить такий патерн на щойно закритій свічці
+detect_sweep()   — знаходить такий патерн на щойно закритих свічках (до max_age штук)
 session_levels() — Daily Open + Prev Day High/Low, з тих самих OHLCV,
                    без додаткових API-запитів
 render_chart()   — малює свічки + рівні + зону ліквідності в PNG
@@ -25,18 +25,10 @@ SWEEP_LOOKBACK   = 30    # скільки попередніх свічок вв
 SWEEP_MIN_WICK_PCT = 0.15  # мінімальний розмір фітиля відносно ATR-подібного розмаху, щоб не ловити шум
 
 
-def detect_sweep(df: pd.DataFrame, lookback: int = SWEEP_LOOKBACK) -> dict | None:
-    """Перевіряє останню ЗАКРИТУ свічку (передостанню в df, бо остання може
-    бути ще формуватись) на предмет liquidity sweep:
-      - лоу/хай пробиває екстремум попередніх `lookback` свічок
-      - закриття повертається назад всередину діапазону
-      - є видимий фітиль у бік пробою (не просто закрився за межею)
-    Повертає None, якщо патерну немає.
-    """
-    if len(df) < lookback + 3:
+def _sweep_on_bar(df: pd.DataFrame, idx: int, lookback: int) -> dict | None:
+    """Перевіряє одну конкретну (закриту) свічку df.iloc[idx] на liquidity sweep."""
+    if idx - lookback < 0:
         return None
-
-    idx = len(df) - 2   # передостання = остання ЗАКРИТА свічка
     window = df.iloc[idx - lookback: idx]
     if window.empty:
         return None
@@ -68,6 +60,40 @@ def detect_sweep(df: pd.DataFrame, lookback: int = SWEEP_LOOKBACK) -> dict | Non
                 "candle_idx": idx, "time": row["time"], "wick_pct": wick / rng,
                 "text": "винесли ліквідність нижче недавнього лоу і розвернулись вгору",
             }
+
+    return None
+
+
+def detect_sweep(df: pd.DataFrame, lookback: int = SWEEP_LOOKBACK, max_age: int = 1) -> dict | None:
+    """Шукає liquidity sweep на останніх `max_age` ЗАКРИТИХ свічках (остання
+    в df ще формується, тому закриті — від передостанньої назад):
+      - лоу/хай пробиває екстремум попередніх `lookback` свічок
+      - закриття повертається назад всередину діапазону
+      - є видимий фітиль у бік пробою (не просто закрився за межею)
+    max_age=1 — лише остання закрита свічка (стара поведінка). Більше значення
+    потрібне, бо GitHub Actions запускає бота раз на 2-5 год замість 30 хв, і
+    sweep на свічці, що закрилась між запусками, інакше ніколи не буде помічено.
+    Sweep з давнішої свічки відкидається, якщо ціна вже забрала його екстремум
+    (SHORT: пізніші свічки, включно з поточною, вийшли вище хая sweep-свічки;
+    LONG — нижче її лоу) — тоді сетап уже відпрацював/зламався.
+    Повертає найсвіжіший чинний sweep (з полем age_bars) або None.
+    """
+    if len(df) < lookback + 3:
+        return None
+
+    for age in range(max_age):
+        idx = len(df) - 2 - age   # age=0 — остання ЗАКРИТА свічка
+        r = _sweep_on_bar(df, idx, lookback)
+        if not r:
+            continue
+        later = df.iloc[idx + 1:]
+        bar = df.iloc[idx]
+        if r["type"] == "SHORT" and float(later["high"].max()) > float(bar["high"]):
+            continue
+        if r["type"] == "LONG" and float(later["low"].min()) < float(bar["low"]):
+            continue
+        r["age_bars"] = age
+        return r
 
     return None
 

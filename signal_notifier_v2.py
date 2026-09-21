@@ -47,6 +47,7 @@ COINS_FOR_NEWS = [s.split("/")[0] for s in SYMBOLS]   # для фільтрац�
 MIN_SIGNAL_STRENGTH  = 3    # 1-10, рекомендую 3
 MAX_SIGNALS_PER_RUN  = 5    # топ-N за силою — щоб 20 монет не слали 20 окремих алертів
 PRICE_MOVE_ALERT    = 2.5   # % за останню годину → сповіщення
+SWEEP_MAX_AGE_BARS   = 4   # скільки останніх закритих 1h-свічок скануємо на sweep (GH Actions запускає бота раз на 2-5 год, не кожні 30 хв)
 MARKET_WIDE_SWEEP_MIN = 3   # мінімум монет з liquidity sweep в один бік за один прогін, щоб рахувати це ринковою хвилею, а не рухом однієї монети
 NEWS_HOURS_BACK     = 1.5   # шукати новини за останні N годин
 ANNOUNCE_HOURS_BACK = 24    # шукати анонси Binance за останні N годин
@@ -846,6 +847,14 @@ def fmt_news(news: list[dict], fg: int, fg_cls: str) -> str | None:
     lines.append("📱 Джерела: CoinTelegraph, Decrypt")
     return "\n".join(lines)
 
+def sweep_age_note(sweep: dict) -> str:
+    """Якщо запуск бота запізнився і sweep-свічка закрилась годину+ тому — кажемо про це,
+    щоб алерт не виглядав як щойно сталий."""
+    n = sweep.get("age_bars", 0)
+    if n < 1:
+        return ""
+    return f"⏱ Sweep-свічка закрилась ~{n} год тому, ціна ще не оновила її екстремум\n"
+
 def fmt_sweep_caption(symbol: str, sweep: dict, ind: dict) -> str:
     t = datetime.now().strftime("%H:%M")
     e = "🟢" if sweep["type"] == "LONG" else "🔴"
@@ -855,6 +864,7 @@ def fmt_sweep_caption(symbol: str, sweep: dict, ind: dict) -> str:
         f"{sweep['text'].capitalize()}\n"
         f"Рівень: ${fmt_price(sweep['level'])} | Фітиль {sweep['wick_pct']*100:.0f}% свічки\n"
         f"💰 Зараз: ${fmt_price(ind['price'])}\n"
+        f"{sweep_age_note(sweep)}"
         f"━━━━━━━━━━━━━━━━\n"
         f"⚠️ Патерн, не гарантія — перевіряємо на реальних даних, чи дає edge"
     )
@@ -873,7 +883,9 @@ def fmt_market_wide_alert(hits: list[dict], direction: str) -> str:
         sym, sweep, ind = h["sym"], h["sweep"], h["ind"]
         lines.append(
             f"• <b>{sym}</b>: ${fmt_price(sweep['level'])} → ${fmt_price(ind['price'])} "
-            f"(фітиль {sweep['wick_pct']*100:.0f}%)"
+            f"(фітиль {sweep['wick_pct']*100:.0f}%"
+            + (f", ~{sweep['age_bars']} год тому" if sweep.get("age_bars", 0) >= 1 else "")
+            + ")"
         )
     lines += [
         "━━━━━━━━━━━━━━━━",
@@ -940,7 +952,7 @@ def main():
         if sym == "BTC/USD":
             btc_mom1h = ind["mom1h"]
 
-        sweep = detect_sweep(df)
+        sweep = detect_sweep(df, max_age=SWEEP_MAX_AGE_BARS)
         if sweep:
             sweep_hits.append({"sym": sym, "df": df, "ind": ind, "sweep": sweep})
 
@@ -983,6 +995,9 @@ def main():
     for hit in sweep_hits[:MAX_SIGNALS_PER_RUN]:
         sym, sweep, ind = hit["sym"], hit["sweep"], hit["ind"]
         key = f"{sym}_SWEEP"
+        seen_key = f"sweep_{sym}_{int(sweep['time'].timestamp())}"
+        if already_seen(seen_key, cd):
+            print(f"  {sym} sweep → цю свічку вже надсилали"); continue
         if not ok_to_send(key, cd):
             print(f"  {sym} sweep → cooldown активний"); continue
         try:
@@ -994,6 +1009,7 @@ def main():
                 render_chart(chart_df, sym, sweep, levels, tf.name)
                 if tg_photo(tf.name, fmt_sweep_caption(sym, sweep, ind)):
                     mark_sent(key, cd)
+                    mark_seen(seen_key, cd)
                     track_signal(sym, sweep["type"], ind["price"], cd, "LIQUIDITY_SWEEP")
                     sent += 1
             os.unlink(tf.name)
@@ -1005,14 +1021,23 @@ def main():
     #       в один бік, це швидше ринкова хвиля, ніж рух окремої монети
     for direction in ("SHORT", "LONG"):
         dir_hits = [h for h in sweep_hits if h["sweep"]["type"] == direction]
+        if not dir_hits:
+            continue
+        # "одночасно" = sweep-свічки не далі ніж на 1 год від найсвіжішої
+        newest = max(h["sweep"]["time"] for h in dir_hits)
+        dir_hits = [h for h in dir_hits if newest - h["sweep"]["time"] <= pd.Timedelta(hours=1)]
         if len(dir_hits) < MARKET_WIDE_SWEEP_MIN:
             continue
+        mw_seen = f"mw_{direction}_{int(newest.timestamp())}"
+        if already_seen(mw_seen, cd):
+            print(f"  Market-wide {direction} sweep → цю хвилю вже надсилали"); continue
         key = f"MARKET_WIDE_SWEEP_{direction}"
         if not ok_to_send(key, cd):
             print(f"  Market-wide {direction} sweep ({len(dir_hits)} монет) → cooldown активний")
             continue
         if tg(fmt_market_wide_alert(dir_hits, direction)):
             mark_sent(key, cd)
+            mark_seen(mw_seen, cd)
             sent += 1
 
     # ── 2. Новини ────────────────────────────────────────────
