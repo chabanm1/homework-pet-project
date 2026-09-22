@@ -33,7 +33,18 @@
   BTC_CU_L / BTC_CU_S   BTC 4h >=+2% і альт 4h <=+0.5% -> LONG альта; BTC 4h <=-2% і альт 4h >=-0.5% -> SHORT альта
   RSI_OB_LONG           (контроль, забруднена) RSI(14, Wilder) > 72 -> LONG
 
-    python backtest/ideas.py
+FORWARD-ТЕСТ (зафіксовано 2026-09-23, після першого запуску; змінювати не можна)
+  Перший запуск (дані до 2026-09-20): 0 PASS. Для перевірки на НОВИХ даних обрано 4 комірки, найкращі на холдауті:
+  RS_TOP3_L, FUND_LO_L, GLS_LO_L, SHK_UP_CONT_L. Ті самі ознаки/параметри/кулдаун/метрика, що вище;
+  рахуються лише сигнали з 2026-09-21 00:00 UTC (цих даних під час вибору ще не було).
+  Вердикт по кожній: 95% CI edge24 зі скоригованим рівнем 0.05/4 (Бонферроні):
+    ПІДТВЕРДЖЕНО = CI > 0 і середня чиста угода > 0;  СПРОСТОВАНО = CI < 0;  інакше — ще невідомо.
+  Очікувана тривалість: CI ~±0.7–1.1% за 6 міс при очікуваному edge ~0.4–0.6% => відповідь за ~1–2 роки.
+  Оновлення даних і перевірка (раз на місяць):
+    python backtest/data.py && python backtest/data_extra.py && python backtest/ideas.py --forward
+
+    python backtest/ideas.py              # повна таблиця (як у першому запуску)
+    python backtest/ideas.py --forward    # тільки forward-тест 4 комірок
 """
 import sys, warnings
 from pathlib import Path
@@ -213,6 +224,31 @@ def boot(df, col, alpha):
     m = s[ii].sum(1) / c[ii].sum(1)
     return np.percentile(m, 100 * alpha / 2), np.percentile(m, 100 * (1 - alpha / 2))
 
+
+FORWARD_FROM = pd.Timestamp("2026-09-21", tz="UTC")
+FORWARD_CELLS = ["RS_TOP3_L", "FUND_LO_L", "GLS_LO_L", "SHK_UP_CONT_L"]
+
+if "--forward" in sys.argv:
+    a = 0.05 / len(FORWARD_CELLS)
+    last_ok = dt[n - 25] if n > 25 else dt[0]       # далі 24h-результат ще не відомий
+    print(f"FORWARD-ТЕСТ: сигнали з {FORWARD_FROM:%Y-%m-%d} по {last_ok:%Y-%m-%d %H:%M} UTC "
+          f"({max(0, (last_ok - FORWARD_FROM).days)} днів), CI {100*(1-a):.2f}% (Бонферроні 0.05/{len(FORWARD_CELLS)})\n")
+    out = []
+    for name in FORWARD_CELLS:
+        ev = events(name)
+        ev = ev[ev.dt >= FORWARD_FROM] if len(ev) else ev
+        if len(ev) < 30:
+            out.append(dict(cell=name, n=len(ev), днів=ev.day.nunique() if len(ev) else 0, вердикт="ще невідомо (<30 сигналів)"))
+            continue
+        lo, hi = boot(ev, "edge24", a)
+        v = "ПІДТВЕРДЖЕНО" if lo > 0 and ev.net24.mean() > 0 else ("СПРОСТОВАНО" if hi < 0 else "ще невідомо")
+        out.append(dict(cell=name, n=len(ev), днів=ev.day.nunique(), net24=round(ev.net24.mean() * 100, 3),
+                        edge24=round(ev.edge24.mean() * 100, 3), CI_adj=f"[{lo*100:+.2f};{hi*100:+.2f}]", вердикт=v))
+    pd.set_option("display.width", 200)
+    print(pd.DataFrame(out).to_string(index=False))
+    print("\n(% за 24 год після комісій 0.12%; edge = проти випадкового лонгу в тому ж місяці; "
+          "очікувано на холдауті: +0.39 / +0.56 / +0.49 / +0.48)")
+    sys.exit(0)
 
 real = [k for k in E if not k.startswith("PLACEBO") and k != "RSI_OB_LONG"]
 N = len(real)
