@@ -420,7 +420,7 @@ def fetch_news(hours_back: float = NEWS_HOURS_BACK) -> list[dict]:
                         "source": source,
                         "url":    (item.findtext("link") or "").strip(),
                         "pos": 0, "neg": 0, "score": 0,
-                        "pub":    pub.astimezone(timezone.utc).strftime("%H:%M"),
+                        "pub":    pub.astimezone(KYIV).strftime("%H:%M"),
                         "coins":  _match_coins(title),
                     })
                 except Exception:
@@ -507,7 +507,7 @@ def fetch_binance_announcements(hours_back: float = ANNOUNCE_HOURS_BACK) -> list
                         "label": label,
                         "title": title,
                         "url":   f"https://www.binance.com/en/support/announcement/{art.get('code', '')}",
-                        "pub":   pub.strftime("%d.%m %H:%M"),
+                        "pub":   pub.astimezone(KYIV).strftime("%d.%m %H:%M"),
                     })
                 except Exception:
                     continue
@@ -812,11 +812,9 @@ def strength_pct(strength: int, rule: str | None = None, cd: dict | None = None)
         wr = rule_win_rate(cd, rule)
         if wr is not None:
             return f"~{wr:.0f}% (виміряно)"
-    if strength >= STRONG_STRENGTH:
-        return "~65-70%"
-    if strength >= MEDIUM_STRENGTH:
-        return "~50-55%"
-    return "<45%"
+    # Раніше тут була вилка ~65-70% / ~50-55% / <45% за силою — бектест 2024-01..2026-09 її не підтвердив:
+    # алерти будь-якої сили ≈ випадковий вхід (edge ~0R). Тож без живих даних чесно кажемо «не виміряно».
+    return "точність не виміряна"
 
 
 def tp_sl(price: float, atr: float, sig_type: str) -> tuple[float, float]:
@@ -840,7 +838,7 @@ def advice_block(sig: dict, ind: dict, cd: dict | None = None) -> str:
         return (
             f"\n🎯 <b>ПОРАДА: СИЛЬНИЙ ({pct}) — заходь зараз {action}</b>\n"
             f"SL: ${fmt_price(sl)} | TP: ${fmt_price(tp)}\n"
-            f"<i>{'% — реальний win-rate цього типу за 14д' if '(виміряно)' in pct else '% — груба оцінка за силою сигналу, не бектест'}</i>"
+            f"<i>{'% — реальний win-rate цього типу за 14д' if '(виміряно)' in pct else 'бектест 2024–2026: сигнали такої сили ≈ випадковий вхід'}</i>"
         )
     if strength >= MEDIUM_STRENGTH:
         trig = price + ATR_TRIGGER_MULT * atr if sig["type"] == "LONG" else price - ATR_TRIGGER_MULT * atr
@@ -880,7 +878,7 @@ def nearby_econ_note(econ: list[dict], hours: float = 8) -> str:
 
 def fmt_signal(symbol: str, ind: dict, fg: int, fg_cls: str,
                sig: dict, econ: list[dict] | None = None, cd: dict | None = None) -> str:
-    t = datetime.now().strftime("%H:%M")
+    t = datetime.now(KYIV).strftime("%H:%M")
     e = {"LONG":"🟢","SHORT":"🔴","MOVE":"⚡","VOL":"👀"}.get(sig["type"],"📊")
     return (
         f"{e} <b>{symbol} — {sig['type']} ({t})</b>\n"
@@ -900,7 +898,7 @@ def fmt_signal(symbol: str, ind: dict, fg: int, fg_cls: str,
 def fmt_news(news: list[dict], fg: int, fg_cls: str) -> str | None:
     if not news:
         return None
-    t = datetime.now().strftime("%H:%M")
+    t = datetime.now(KYIV).strftime("%H:%M")
     lines = [f"📰 <b>КРИПТО НОВИНИ ({t})</b>",
              f"F&G: {fg} ({fg_cls})",
              "━━━━━━━━━━━━━━━━"]
@@ -926,7 +924,7 @@ def sweep_age_note(sweep: dict) -> str:
     return f"⏱ Sweep-свічка закрилась ~{n} год тому, ціна ще не оновила її екстремум\n"
 
 def fmt_sweep_caption(symbol: str, sweep: dict, ind: dict) -> str:
-    t = datetime.now().strftime("%H:%M")
+    t = datetime.now(KYIV).strftime("%H:%M")
     e = "🟢" if sweep["type"] == "LONG" else "🔴"
     return (
         f"{e} <b>{symbol} — LIQUIDITY SWEEP ({t})</b>\n"
