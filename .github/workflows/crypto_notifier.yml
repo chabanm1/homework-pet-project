@@ -1,4 +1,4 @@
-name: Crypto Signal Notifier
+name: Periodic check
 
 on:
   schedule:
@@ -6,6 +6,12 @@ on:
     # найсильніше затримує/пропускає scheduled-запуски (фактично було раз на 2-5 год)
     - cron: '7,37 * * * *'
   workflow_dispatch:  # ручний запуск для тесту
+
+# Обидва воркфлоу читають/пишуть той самий кеш crypto_cooldown.json — не запускаємо їх паралельно
+# (запуск за розкладом + зовнішній workflow_dispatch інакше можуть дати дубль алерту).
+concurrency:
+  group: bot-state
+  cancel-in-progress: false
 
 jobs:
   notify:
