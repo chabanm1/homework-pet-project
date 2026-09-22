@@ -688,7 +688,6 @@ def signals(ind: dict, fg: int, funding: float | None = None, htf_trend: str | N
     # а монета, що ще триває в русі (не заходити "на вершку хвилі").
     REVERSAL_CONFIRM_PCT = 0.15
     bottom_confirmed = ind["off_low_pct"] >= REVERSAL_CONFIRM_PCT
-    top_confirmed = ind["off_high_pct"] <= -REVERSAL_CONFIRM_PCT
 
     if rsi < 28 and vs > 1.3:
         sigs.append({"type": "LONG", "rule": "RSI_EXTREME",
@@ -699,12 +698,9 @@ def signals(ind: dict, fg: int, funding: float | None = None, htf_trend: str | N
     elif rsi < 35:
         sigs.append({"type": "LONG", "rule": "RSI_MILD", "strength": 5,
                      "text": f"🟡 RSI={rsi:.0f} — перепроданість"})
-    elif rsi > 72 and vs > 1.3:
-        sigs.append({"type": "SHORT", "rule": "RSI_EXTREME",
-                     "strength": 8 if top_confirmed else 5,
-                     "text": f"🔴 RSI={rsi:.0f} — сильна перекупленість\n"
-                             f"+ обсяг ×{vs:.1f}"
-                             + ("" if top_confirmed else "\n⚠️ ціна ще на свіжому хаї — розворот не підтверджений")})
+    # RSI_EXTREME SHORT (RSI>72 + обсяг, сила 8) прибрано 2026-09-23: бектест 2024-01..2026-09 —
+    # алерти значимо гірші за випадковий шорт і при 4h-тренді вгору (−0.12R), і при плоскому (−0.16R),
+    # при низхідному теж мінус (мало даних). Перекупленість тепер — лише слабкий RSI_MILD нижче.
     elif rsi > 68:
         sigs.append({"type": "SHORT", "rule": "RSI_MILD", "strength": 5,
                      "text": f"🟠 RSI={rsi:.0f} — перекупленість"})
