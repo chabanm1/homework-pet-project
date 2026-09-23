@@ -57,14 +57,14 @@ def main():
         log_batch = []
         for sym, ind, trend, best in actionable:
             pct, tier = strength_to_tier(best["strength"], best.get("rule"), cd)
-            wr = bot.rule_win_rate(cd, best.get("rule", "OTHER"))
-            wr_txt = f"{wr:.0f}% (14d)" if wr is not None else "н/д"
+            st = bot.rule_stats(cd, best.get("rule", "OTHER"))
+            wr_txt = f"{bot.fmt_rule_stats(st)} (14d)" if st is not None else "н/д"
             mark = "🟢" if best["type"] == "LONG" else "🔴"
             print(
                 f"{mark} {sym:<10} {best['type']:<6} [{best['rule']}] сила={best['strength']}  "
                 f"{pct} {tier}\n"
                 f"    RSI={ind['rsi']:.0f}  тренд4h={trend}  offHigh={ind['off_high_pct']:+.2f}%  "
-                f"offLow={ind['off_low_pct']:+.2f}%  реальний win-rate={wr_txt}"
+                f"offLow={ind['off_low_pct']:+.2f}%  реальний результат={wr_txt}"
             )
             log_batch.append({
                 "ts": datetime.now(KYIV).isoformat(), "symbol": sym, "price": ind["price"],

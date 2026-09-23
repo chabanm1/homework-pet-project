@@ -298,25 +298,32 @@ def signal_stats_by_rule(cd: dict, days: float = 1, min_n: int = 3) -> list[dict
     return out
 
 RULE_LEARN_DAYS  = 14   # ширше вікно, ніж денна розбивка в дайджесті — рішення "приглушити" мають спиратись на більше даних
-RULE_LEARN_MIN_N = 15   # мінімум вирішених сигналів цього типу, щоб довіряти відсотку
-RULE_LEARN_LOW   = 40   # win-rate нижче — тип вважаємо стабільно слабким
-RULE_LEARN_HIGH  = 65   # win-rate вище — тип вважаємо стабільно сильним
+RULE_LEARN_MIN_N = 15   # мінімум сигналів цього типу з виміряним результатом по SL/TP, щоб щось вирішувати
+RULE_LEARN_BAD_R = -0.25   # середній R нижче — тип вважаємо слабким (приглушуємо охоче)
 RULE_LEARN_PENALTY = 3
-RULE_LEARN_BONUS   = 1
+RULE_LEARN_BONUS   = 1     # підсилюємо лише якщо нижня межа 95% CI середнього R > 0 (обережно)
 
-def rule_win_rate(cd: dict, rule: str) -> float | None:
-    """Win-rate конкретного типу сигналу за RULE_LEARN_DAYS — None, якщо
-    даних замало, щоб довіряти. Використовується, щоб бот сам приглушував
-    типи, які стабільно програють, замість того щоб довіряти всім однаково."""
+def rule_stats(cd: dict, rule: str) -> dict | None:
+    """Результат конкретного типу сигналу за RULE_LEARN_DAYS за SL/TP бота (що ціна
+    зачепила першим, в одиницях R) — None, якщо таких записів < RULE_LEARN_MIN_N.
+    Раніше тут був win-rate «+0.3% через 4 год»: у ринку, що росте, він дає 80%+
+    майже будь-якому LONG (дрейф), тоді як бектест показує edge ≈ 0R. Тепер правило
+    оцінюємо так, як реально торгується угода."""
     cutoff = time.time() - RULE_LEARN_DAYS * 86400
     recs = [r for r in cd.get("_track", [])
-            if r.get("resolved") and r["ts"] >= cutoff and r.get("rule") == rule]
-    wins   = sum(1 for r in recs if r["outcome"] == "win")
-    losses = sum(1 for r in recs if r["outcome"] == "loss")
-    decided = wins + losses
-    if decided < RULE_LEARN_MIN_N:
+            if r.get("resolved") and r["ts"] >= cutoff and r.get("rule") == rule and r.get("r") is not None]
+    n = len(recs)
+    if n < RULE_LEARN_MIN_N:
         return None
-    return wins / decided * 100
+    rs = [r["r"] for r in recs]
+    avg = sum(rs) / n
+    half = 1.96 * (sum((x - avg) ** 2 for x in rs) / (n - 1)) ** 0.5 / n ** 0.5
+    return {"n": n, "avg_r": avg, "lo": avg - half, "hi": avg + half,
+            "tp": sum(1 for r in recs if r.get("hit") == "tp"),
+            "sl": sum(1 for r in recs if r.get("hit") in ("sl", "both"))}
+
+def fmt_rule_stats(st: dict) -> str:
+    return f"TP {st['tp']}/{st['n']}, SL {st['sl']}/{st['n']}, сер. {st['avg_r']:+.2f}R"
 
 
 # ══════════════════════════════════════════════════════════════
@@ -776,15 +783,15 @@ def signals(ind: dict, fg: int, funding: float | None = None, htf_trend: str | N
         for s in sigs:
             if s["type"] not in ("LONG", "SHORT"):
                 continue
-            wr = rule_win_rate(cd, s.get("rule", "OTHER"))
-            if wr is None:
+            st = rule_stats(cd, s.get("rule", "OTHER"))
+            if st is None:
                 continue
-            if wr < RULE_LEARN_LOW:
+            if st["avg_r"] < RULE_LEARN_BAD_R:
                 s["strength"] = max(1, s["strength"] - RULE_LEARN_PENALTY)
-                s["text"] += f"\n📉 Цей тип історично слабкий (win-rate {wr:.0f}% за {RULE_LEARN_DAYS}д)"
-            elif wr > RULE_LEARN_HIGH:
+                s["text"] += f"\n📉 Цей тип за {RULE_LEARN_DAYS}д у мінусі ({fmt_rule_stats(st)})"
+            elif st["lo"] > 0:
                 s["strength"] = min(10, s["strength"] + RULE_LEARN_BONUS)
-                s["text"] += f"\n📈 Цей тип історично сильний (win-rate {wr:.0f}% за {RULE_LEARN_DAYS}д)"
+                s["text"] += f"\n📈 Цей тип за {RULE_LEARN_DAYS}д стабільно в плюсі ({fmt_rule_stats(st)})"
 
     # Кореляція з BTC — попереджаємо, що це може бути загальноринковий рух,
     # а не унікальна можливість саме в цій монеті
@@ -803,15 +810,13 @@ def signals(ind: dict, fg: int, funding: float | None = None, htf_trend: str | N
 # ФОРМАТУВАННЯ ПОВІДОМЛЕНЬ
 # ══════════════════════════════════════════════════════════════
 def strength_pct(strength: int, rule: str | None = None, cd: dict | None = None) -> str:
-    """Якщо для цього типу правила вже є досить накопиченої історії
-    (rule_win_rate — 15+ вирішених за 14д), показуємо РЕАЛЬНИЙ виміряний
-    win-rate замість вигаданої вилки — інакше цифра в повідомленні може
-    показувати "~65-70%" на типі сигналу, що прямо зараз програє в живу.
-    Без досить даних — груба якісна категорія за шкалою сили (1-10)."""
+    """Якщо для цього типу правила вже є досить живої історії з SL/TP
+    (rule_stats — 15+ за 14д), показуємо РЕАЛЬНИЙ виміряний результат
+    (TP/SL і середній R), інакше чесно кажемо, що точність не виміряна."""
     if rule is not None and cd is not None:
-        wr = rule_win_rate(cd, rule)
-        if wr is not None:
-            return f"~{wr:.0f}% (виміряно)"
+        st = rule_stats(cd, rule)
+        if st is not None:
+            return f"{fmt_rule_stats(st)} (виміряно)"
     # Раніше тут була вилка ~65-70% / ~50-55% / <45% за силою — бектест 2024-01..2026-09 її не підтвердив:
     # алерти будь-якої сили ≈ випадковий вхід (edge ~0R). Тож без живих даних чесно кажемо «не виміряно».
     return "точність не виміряна"
@@ -838,7 +843,7 @@ def advice_block(sig: dict, ind: dict, cd: dict | None = None) -> str:
         return (
             f"\n🎯 <b>ПОРАДА: СИЛЬНИЙ ({pct}) — заходь зараз {action}</b>\n"
             f"SL: ${fmt_price(sl)} | TP: ${fmt_price(tp)}\n"
-            f"<i>{'% — реальний win-rate цього типу за 14д' if '(виміряно)' in pct else 'бектест 2024–2026: сигнали такої сили ≈ випадковий вхід'}</i>"
+            f"<i>{'реальні результати цього типу з SL/TP бота за 14д' if '(виміряно)' in pct else 'бектест 2024–2026: сигнали такої сили ≈ випадковий вхід'}</i>"
         )
     if strength >= MEDIUM_STRENGTH:
         trig = price + ATR_TRIGGER_MULT * atr if sig["type"] == "LONG" else price - ATR_TRIGGER_MULT * atr

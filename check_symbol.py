@@ -9,7 +9,7 @@ signal_notifier_v2.py: indicators() (RSI/MACD/BB/reversal-confirmation),
 fetch_trend() (4h тренд і його штраф/бонус), signals() (усі правила разом).
 
 ВАЖЛИВО про "% впевненості": це НЕ виміряний історичний win-rate.
-Реальний win-rate (rule_win_rate) рахується ботом на GitHub Actions і
+Реальний результат правил (rule_stats) рахується ботом на GitHub Actions і
 живе в crypto_cooldown.json там, не локально — тут його немає (буде
 показано "н/д", поки не з'явиться реальна історія). Показаний тут "%" —
 це груба якісна категорія за шкалою сили сигналу (1-10), просто
@@ -35,7 +35,7 @@ LOG_FILE = "signal_checks_log.jsonl"
 
 def strength_to_tier(strength: int, rule: str | None = None, cd: dict | None = None) -> tuple[str, str]:
     """Груба якісна категорія, НЕ виміряна ймовірність (якщо для rule вже є
-    досить накопиченої історії — strength_pct() підставить реальний win-rate
+    досить накопиченої історії — strength_pct() підставить реальний результат по SL/TP
     замість вигаданої вилки). % рахує та сама strength_pct(), що вставляється
     в реальні Telegram-повідомлення бота."""
     pct = bot.strength_pct(strength, rule, cd)
@@ -78,11 +78,11 @@ def main():
         if pct:
             print(f"  Оцінка: {pct} — {tier}")
 
-        wr = bot.rule_win_rate(cd, s.get("rule", "OTHER"))
-        if wr is not None:
-            print(f"  Реальний win-rate правила ({s['rule']}, 14d): {wr:.0f}%")
+        st = bot.rule_stats(cd, s.get("rule", "OTHER"))
+        if st is not None:
+            print(f"  Реальний результат правила ({s['rule']}, 14d): {bot.fmt_rule_stats(st)}")
         else:
-            print(f"  Реальний win-rate правила ({s['rule']}): н/д (недостатньо даних локально)")
+            print(f"  Реальний результат правила ({s['rule']}): н/д (недостатньо даних локально)")
 
         if s["type"] in ("LONG", "SHORT"):
             logged.append({
