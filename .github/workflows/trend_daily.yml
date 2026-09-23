@@ -1,0 +1,32 @@
+name: Daily trend
+
+on:
+  schedule:
+    # Раз на добу після денного закриття Kraken (00:00 UTC): 03:05 Київ літом, 02:05 взимку
+    - cron: '5 0 * * *'
+  workflow_dispatch:  # ручний запуск для тесту
+
+jobs:
+  trend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Python setup
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Стану не зберігає і не чіпає crypto_cooldown.json — паперові угоди відтворюються з історії свічок
+      - name: Run daily trend message
+        env:
+          TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python trend_daily.py

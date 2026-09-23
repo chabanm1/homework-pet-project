@@ -32,24 +32,29 @@ def signal(c: pd.Series) -> pd.Series:
 
 
 def trade_state(d: pd.DataFrame) -> dict:
-    """Стан угоди за правилами trend_lev.py (DC20) на денних свічках d[open, high, low, close] (лише закриті дні).
-    Вхід: n >= 5 після n <= 4. Стоп: середина 20 попередніх закриттів, лише вгору. Вихід: low <= стоп або n <= 2."""
+    """Угоди за правилами trend_lev.py (DC20) на денних свічках d[open, high, low, close] (лише закриті дні).
+    Вхід: n >= 5 після n <= 4. Стоп: середина 20 попередніх закриттів, лише вгору.
+    Вихід: low <= стоп (за стопом, або за open, якщо день відкрився нижче) або n <= 2 (за close).
+    Повертає n, відкриту позицію pos (з t0, entry, stop, stop0, stop_next), закриті угоди trades і стоп на завтра."""
     n = (signal(d["close"]) * 9).round()
     mid20 = (d["close"].rolling(20).max() + d["close"].rolling(20).min()).shift(1) / 2
-    pos = None
+    pos, trades = None, []
     for i in range(1, len(d)):
         t = d.index[i]
         if pos is not None:
             if d["low"].iat[i] <= pos["stop"]:
+                trades.append(dict(pos, t1=t, exit=min(d["open"].iat[i], pos["stop"]), how="стоп"))
                 pos = None
             elif n.iat[i] <= 2:
+                trades.append(dict(pos, t1=t, exit=d["close"].iat[i], how="сигнал"))
                 pos = None
             else:
                 pos["stop"] = max(pos["stop"], mid20.iat[i])
+                pos["stops"][t] = pos["stop"]
         if pos is None and n.iat[i] >= 5 and n.iat[i - 1] <= 4 and mid20.iat[i] < d["close"].iat[i]:
-            pos = dict(t0=t, entry=d["close"].iat[i], stop=mid20.iat[i])
+            pos = dict(t0=t, entry=d["close"].iat[i], stop=mid20.iat[i], stop0=mid20.iat[i], stops={t: mid20.iat[i]})
     c = d["close"]
     stop_next = (c.iloc[-20:].max() + c.iloc[-20:].min()) / 2       # середина з урахуванням останнього закриття
     if pos is not None:
         pos["stop_next"] = max(pos["stop"], stop_next)
-    return dict(n=n, pos=pos, stop_next=stop_next)
+    return dict(n=n, pos=pos, trades=trades, stop_next=stop_next)
