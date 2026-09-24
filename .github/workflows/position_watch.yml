@@ -1,0 +1,46 @@
+name: Position watch
+
+on:
+  schedule:
+    # Кожні 30 хв (GitHub може запізнюватись на 5-20 хв). Закриває позицію стоп-ордер на біржі, не цей сторож.
+    - cron: '*/30 * * * *'
+  workflow_dispatch:  # ручний запуск для тесту
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Python setup
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore watch state
+        uses: actions/cache/restore@v4
+        with:
+          path: position_watch.json
+          key: poswatch-${{ github.run_id }}
+          restore-keys: |
+            poswatch-
+
+      - name: Run position watch
+        env:
+          TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python position_watch.py
+
+      - name: Save watch state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: position_watch.json
+          key: poswatch-${{ github.run_id }}
