@@ -822,6 +822,15 @@ def strength_pct(strength: int, rule: str | None = None, cd: dict | None = None)
     return "точність не виміряна"
 
 
+def losing_rule(rule: str | None, cd: dict | None) -> dict | None:
+    """Виміряна історія цього типу мінусова (сер. R <= 0 або SL частіше за TP) —
+    тоді «заходь зараз» не пишемо, хоч би якою була сила індикаторів."""
+    if rule is None or cd is None:
+        return None
+    st = rule_stats(cd, rule)
+    return st if st is not None and (st["avg_r"] <= 0 or st["sl"] > st["tp"]) else None
+
+
 def tp_sl(price: float, atr: float, sig_type: str) -> tuple[float, float]:
     """SL/TP на основі ATR(14). Груба евристика, не фінансова порада."""
     if sig_type == "LONG":
@@ -838,6 +847,9 @@ def advice_block(sig: dict, ind: dict, cd: dict | None = None) -> str:
     strength = sig["strength"]
 
     pct = strength_pct(strength, sig.get("rule"), cd)
+    if (bad := losing_rule(sig.get("rule"), cd)) is not None:
+        return (f"\n⛔ <b>ПОРАДА: НЕ ЗАХОДЬ — цей тип за {RULE_LEARN_DAYS}д не заробляє ({fmt_rule_stats(bad)})</b>\n"
+                "<i>реальні результати з SL/TP бота</i>")
     if strength >= STRONG_STRENGTH:
         sl, tp = tp_sl(price, atr, sig["type"])
         return (
@@ -864,6 +876,8 @@ def compact_advice(sig: dict, ind: dict, cd: dict | None = None) -> str:
     action = "BUY" if sig["type"] == "LONG" else "SELL"
     strength = sig["strength"]
     pct = strength_pct(strength, sig.get("rule"), cd)
+    if (bad := losing_rule(sig.get("rule"), cd)) is not None:
+        return f"   → ⛔ не заходь, тип не заробляє ({fmt_rule_stats(bad)})"
     if strength >= STRONG_STRENGTH:
         sl, tp = tp_sl(price, atr, sig["type"])
         return f"   → {action} зараз ({pct}) | SL ${fmt_price(sl)} TP ${fmt_price(tp)}"
