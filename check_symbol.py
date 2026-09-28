@@ -40,10 +40,10 @@ def strength_to_tier(strength: int, rule: str | None = None, cd: dict | None = N
     в реальні Telegram-повідомлення бота."""
     pct = bot.strength_pct(strength, rule, cd)
     if strength >= bot.STRONG_STRENGTH:
-        return pct, "СИЛЬНИЙ (заходь / готовий сетап)"
+        return pct, "СИЛЬНИЙ (інфо, не вхід)"
     if strength >= bot.MEDIUM_STRENGTH:
-        return pct, "СЕРЕДНІЙ (чекай підтвердження)"
-    return pct, "СЛАБКИЙ (не заходити)"
+        return pct, "СЕРЕДНІЙ (інфо, не вхід)"
+    return pct, "СЛАБКИЙ (інфо, не вхід)"
 
 
 def main():

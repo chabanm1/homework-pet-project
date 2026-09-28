@@ -61,7 +61,7 @@ TRACK_CAP     = 300    # скільки записів історії сигна
 ATR_SL_MULT      = 1.5   # стоп-лосс = ATR * це
 ATR_TP_MULT      = 2.5   # тейк-профіт = ATR * це (R:R ≈ 1.67)
 ATR_TRIGGER_MULT = 0.5   # для середніх сигналів — на скільки ATR чекати підтвердження
-STRONG_STRENGTH  = 8     # >= цього — "заходь зараз"
+STRONG_STRENGTH  = 8     # >= цього — "сильний" (лише мітка; порад на вхід бот більше не дає)
 MEDIUM_STRENGTH  = 6     # >= цього (і < STRONG) — "чекай підтвердження"
                           # нижче MEDIUM — "не рухайся"
 
@@ -837,54 +837,25 @@ def tp_sl(price: float, atr: float, sig_type: str) -> tuple[float, float]:
         return price - ATR_SL_MULT * atr, price + ATR_TP_MULT * atr
     return price + ATR_SL_MULT * atr, price - ATR_TP_MULT * atr
 
-def advice_block(sig: dict, ind: dict, cd: dict | None = None) -> str:
-    """Порада за силою сигналу: сильний → заходь зараз з TP/SL,
-    середній → чекай підтвердження на рівні, слабкий → не рухайся."""
-    if sig["type"] not in ("LONG", "SHORT") or not ind.get("atr"):
-        return ""
-    price, atr = ind["price"], ind["atr"]
-    action = "BUY / LONG" if sig["type"] == "LONG" else "SELL / SHORT"
-    strength = sig["strength"]
+INFO_ONLY_NOTE = ("погодинні сигнали ≈ випадковий вхід: бектест 2024–26 (50k сигналів) і живі 18–28.09 "
+                  "(TP 15 / SL 77 з 141)")
 
-    pct = strength_pct(strength, sig.get("rule"), cd)
-    if (bad := losing_rule(sig.get("rule"), cd)) is not None:
-        return (f"\n⛔ <b>ПОРАДА: НЕ ЗАХОДЬ — цей тип за {RULE_LEARN_DAYS}д не заробляє ({fmt_rule_stats(bad)})</b>\n"
-                "<i>реальні результати з SL/TP бота</i>")
-    if strength >= STRONG_STRENGTH:
-        sl, tp = tp_sl(price, atr, sig["type"])
-        return (
-            f"\n🎯 <b>ПОРАДА: СИЛЬНИЙ ({pct}) — заходь зараз {action}</b>\n"
-            f"SL: ${fmt_price(sl)} | TP: ${fmt_price(tp)}\n"
-            f"<i>{'реальні результати цього типу з SL/TP бота за 14д' if '(виміряно)' in pct else 'бектест 2024–2026: сигнали такої сили ≈ випадковий вхід'}</i>"
-        )
-    if strength >= MEDIUM_STRENGTH:
-        trig = price + ATR_TRIGGER_MULT * atr if sig["type"] == "LONG" else price - ATR_TRIGGER_MULT * atr
-        sl, tp = tp_sl(trig, atr, sig["type"])
-        move = "підніметься" if sig["type"] == "LONG" else "опуститься"
-        return (
-            f"\n🟡 <b>ПОРАДА: СЕРЕДНІЙ ({pct}) — чекай підтвердження</b>\n"
-            f"Якщо ціна {move} до ${fmt_price(trig)} → {action}\n"
-            f"SL: ${fmt_price(sl)} | TP: ${fmt_price(tp)}"
-        )
-    return f"\n⚪ <b>ПОРАДА: СЛАБКИЙ ({pct}) — краще не рухатись, просто тримай на радарі</b>"
+def advice_block(sig: dict, ind: dict, cd: dict | None = None) -> str:
+    """Лише інформація, без «заходь»/SL/TP: ні бектест, ні живі результати не показали, що ці сигнали
+    кращі за випадковий вхід. Входи дає тільки денна трендова система (trend_daily.py, 03:05)."""
+    if sig["type"] not in ("LONG", "SHORT"):
+        return ""
+    st = rule_stats(cd, sig.get("rule")) if cd is not None and sig.get("rule") else None
+    measured = f"\nЦей тип за {RULE_LEARN_DAYS}д: {fmt_rule_stats(st)}" if st else ""
+    return (f"\nℹ️ <b>Інформація, не вхід.</b> Входи — лише з денної трендової системи (03:05).{measured}\n"
+            f"<i>{INFO_ONLY_NOTE}</i>")
 
 def compact_advice(sig: dict, ind: dict, cd: dict | None = None) -> str:
-    """Однорядкова версія advice_block — для дайджесту з багатьма монетами."""
-    if sig["type"] not in ("LONG", "SHORT") or not ind.get("atr"):
+    """Однорядкова версія advice_block — для дайджесту (теж без порад на вхід)."""
+    if sig["type"] not in ("LONG", "SHORT"):
         return ""
-    price, atr = ind["price"], ind["atr"]
-    action = "BUY" if sig["type"] == "LONG" else "SELL"
-    strength = sig["strength"]
-    pct = strength_pct(strength, sig.get("rule"), cd)
-    if (bad := losing_rule(sig.get("rule"), cd)) is not None:
-        return f"   → ⛔ не заходь, тип не заробляє ({fmt_rule_stats(bad)})"
-    if strength >= STRONG_STRENGTH:
-        sl, tp = tp_sl(price, atr, sig["type"])
-        return f"   → {action} зараз ({pct}) | SL ${fmt_price(sl)} TP ${fmt_price(tp)}"
-    if strength >= MEDIUM_STRENGTH:
-        trig = price + ATR_TRIGGER_MULT * atr if sig["type"] == "LONG" else price - ATR_TRIGGER_MULT * atr
-        return f"   → чекай ${fmt_price(trig)} → {action} ({pct})"
-    return f"   → краще не рухайся ({pct})"
+    st = rule_stats(cd, sig.get("rule")) if cd is not None and sig.get("rule") else None
+    return f"   → тип за {RULE_LEARN_DAYS}д: {fmt_rule_stats(st)}" if st else ""
 
 def nearby_econ_note(econ: list[dict], hours: float = 8) -> str:
     """Коротке нагадування про макроподію, якщо вона зовсім скоро —
@@ -910,8 +881,7 @@ def fmt_signal(symbol: str, ind: dict, fg: int, fg_cls: str,
         f"📦 Обсяг ×{ind['vs']:.1f}\n"
         f"━━━━━━━━━━━━━━━━"
         f"{advice_block(sig, ind, cd)}"
-        f"{nearby_econ_note(econ or [])}\n"
-        f"⚠️ Евристика на основі ATR, не фінансова порада"
+        f"{nearby_econ_note(econ or [])}"
     )
 
 def fmt_news(news: list[dict], fg: int, fg_cls: str) -> str | None:
@@ -1071,7 +1041,7 @@ def main():
 
     for c in top:
         msg = fmt_signal(c["sym"], c["ind"], fg, fg_cls, c["best"], econ, cd)
-        if tg(msg):
+        if tg(msg, silent=True):   # інформаційне — без звуку
             mark_sent(c["key"], cd)
             track_signal(c["sym"], c["best"]["type"], c["ind"]["price"], cd, c["best"].get("rule", "OTHER"),
                          atr=c["ind"].get("atr"), strength=c["best"]["strength"], trend=c.get("trend"))

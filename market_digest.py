@@ -73,7 +73,7 @@ def market_state(data: list[dict], fg: int, fg_cls: str) -> str:
 MAX_OPPORTUNITIES = 8   # топ-20 монет може дати забагато сетапів для одного Telegram-повідомлення
 
 def opportunities(data: list[dict], cd: dict | None = None) -> str:
-    lines = ["🎯 <b>ПОТЕНЦІЙНО ВИГІДНІ СЕТАПИ</b>", "━━━━━━━━━━━━━━━━"]
+    lines = ["👀 <b>ТЕХНІЧНІ СИГНАЛИ</b> (інфо, не входи)", "━━━━━━━━━━━━━━━━"]
     candidates = []
     for d in data:
         if d["ind"] is None or not d["sigs"]:
@@ -98,7 +98,7 @@ def opportunities(data: list[dict], cd: dict | None = None) -> str:
     if len(candidates) > MAX_OPPORTUNITIES:
         lines.append(f"\n… ще {len(candidates) - MAX_OPPORTUNITIES} сетапів слабших за силою")
 
-    lines.append("\n⚠️ Евристика на основі ATR, не фінансова порада")
+    lines.append(f"\nℹ️ {sn.INFO_ONLY_NOTE}. Входи — лише з денної трендової системи (03:05).")
     return "\n".join(lines)
 
 
