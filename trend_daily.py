@@ -70,10 +70,25 @@ def paper(sym: str, d: pd.DataFrame, st: dict, px: float) -> tuple[list[dict], d
     return closed, dict(sym=sym, t0=t0, entry=entry, stop0=stop0, R_now=r_of(entry, stop0, px))
 
 
+def alt_event(sym: str, d: pd.DataFrame, st: dict, px: float) -> str | None:
+    """Лише події за вчорашнім закриттям для монет поза паперовим рахунком: новий вхід або вихід системи."""
+    coin, p, day = sym.split("/")[0], st["pos"], d.index[-1]
+    if p is not None and p["t0"] == day:
+        dist = 1 - p["stop_next"] / px
+        if dist <= 0:
+            return None
+        return (f"🟢 <b>{coin} НОВИЙ ВХІД ЛОНГ</b> за {fmt(p['entry'])} (зараз {fmt(px)}), модель {int(st['n'].iat[-1])}/9\n"
+                f"   🛑 стоп <b>{fmt(p['stop_next'])}</b> ({-dist*100:.1f}%) · ризик 1% = {0.01/dist:.2f}× депо")
+    closed = [t for t in st["trades"] if t["t1"] == day]
+    if closed:
+        return f"🔴 <b>{coin} ВИХІД</b> ({closed[0]['how']}, за {fmt(closed[0]['exit'])}) — угода з {closed[0]['t0']:%d.%m}"
+    return None
+
+
 def main():
     now = datetime.now(KYIV)
     lines = [f"📐 <b>ТРЕНДОВА СИСТЕМА</b> — {now:%d.%m %H:%M}", "━━━━━━━━━━━━━━━━"]
-    closed_all, open_all, in_trend, total = [], [], 0, 0
+    closed_all, open_all, in_trend, total, alt_events = [], [], 0, 0, []
     last_close = None
     for sym in bot.SYMBOLS:
         got = daily(sym)
@@ -85,6 +100,9 @@ def main():
         total += 1; in_trend += n >= 5
         last_close = d.index[-1]
         if sym not in PAPER_SYMS:
+            ev = alt_event(sym, d, st, px)
+            if ev:
+                alt_events.append(ev)
             continue
         coin = sym.split("/")[0]
         p = st["pos"]
@@ -115,6 +133,11 @@ def main():
     if total == 0:
         print("немає даних Kraken — повідомлення не надіслано")
         return
+    lines.append("🆕 <b>Інші монети — нові входи і виходи системи</b>")
+    lines += alt_events or ["сьогодні подій немає"]
+    lines.append("<i>ті самі правила, що BTC/ETH; бектест 2021–26: ~7 нових входів/міс по 20 монетах, "
+                 "WR ~30%, сер. +0.4R — більшість угод збиткові, заробляють рідкі великі тренди</i>")
+    lines.append("")
     lines.append(f"🌡 Ринок: у тренді {in_trend}/{total} монет (модель ≥ 5/9)")
 
     lines += ["", f"📒 <b>Паперовий рахунок</b> (з {PAPER_START:%d.%m}, BTC+ETH, лише лонг)"]
