@@ -11,7 +11,13 @@
 R = (вихід/вхід − 1 − 0.10% комісій) / (відстань до стопу на вході). Funding не враховано.
 
     python trend_daily.py           # локально без TELEGRAM_TOKEN — друкує повідомлення в консоль
+    python trend_daily.py morning   # ранковий алерт (09:00 Київ): нові входи з нічного закриття, гучно
+
+Нічне повідомлення (03:05) іде без звуку. Входити — вранці: бектест 2024-01..2026-09, 20 монет, 1h-дані
+(scratchpad entry_timing.py, розвідувальний): вхід о 03:00 сер. +0.60R (230 угод), о 08:00/09:00/11:00 Київ
++0.73/+0.67/+0.68R — не гірше; ~5% угод стоп зачіпає ще до ранку, тоді не входимо.
 """
+import sys
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -30,12 +36,13 @@ def fmt(x: float) -> str:
     return f"{x:,.0f}" if x >= 1000 else (f"{x:,.2f}" if x >= 10 else f"{x:.4g}")
 
 
-def daily(sym: str) -> tuple[pd.DataFrame, float] | None:
+def daily(sym: str, with_low: bool = False):
     df = bot.fetch_ohlcv(sym, "1d", 720)
     if df.empty or len(df) < 400:
         return None
     d = df.set_index("time")[["open", "high", "low", "close"]]
-    return d.iloc[:-1], float(d["close"].iat[-1])          # лише закриті дні + поточна ціна
+    got = d.iloc[:-1], float(d["close"].iat[-1])             # лише закриті дні + поточна ціна
+    return (*got, float(d["low"].iat[-1])) if with_low else got   # + мінімум поточного (незакритого) дня
 
 
 def paper(sym: str, d: pd.DataFrame, st: dict, px: float) -> tuple[list[dict], dict | None]:
@@ -83,6 +90,56 @@ def alt_event(sym: str, d: pd.DataFrame, st: dict, px: float) -> str | None:
     if closed:
         return f"🔴 <b>{coin} ВИХІД</b> ({closed[0]['how']}, за {fmt(closed[0]['exit'])}) — угода з {closed[0]['t0']:%d.%m}"
     return None
+
+
+def morning():
+    """Ранковий алерт: угоди, відкриті системою на останньому денному закритті (усі монети), з поточною ціною,
+    стопом і розміром. Якщо вночі ціна вже торкнулася стопу — не входити."""
+    now = datetime.now(KYIV)
+    entries, skipped, exits, last_close = [], [], [], None
+    for sym in bot.SYMBOLS:
+        got = daily(sym, with_low=True)
+        if got is None:
+            continue
+        d, px, low_today = got
+        st = trade_state(d)
+        coin, p, day = sym.split("/")[0], st["pos"], d.index[-1]
+        last_close = day
+        closed = [t for t in st["trades"] if t["t1"] == day]
+        if closed:
+            exits.append(f"🔴 {coin} — система вийшла ({closed[0]['how']}, {fmt(closed[0]['exit'])}); якщо тримаєш — закривай")
+        if p is None or p["t0"] != day:
+            continue
+        stop = p["stop"]
+        if low_today <= stop or px <= stop:
+            skipped.append(f"❌ {coin} — вночі ціна вже торкнулася стопу {fmt(stop)}, НЕ входити")
+            continue
+        dist = 1 - stop / px
+        move = px / p["entry"] - 1
+        entries.append(
+            f"🟢 <b>{coin} — ВХІД ЛОНГ</b>\n"
+            f"   ціна зараз {fmt(px)} (сигнал на закритті {fmt(p['entry'])}, {move*100:+.1f}%) · модель {int(st['n'].iat[-1])}/9\n"
+            f"   🛑 стоп <b>{fmt(stop)}</b> ({-dist*100:.1f}%) — одразу ордером на біржі\n"
+            f"   розмір: ризик 1% → номінал <b>{0.01/dist:.2f}× депо</b> (депо 100 → {100*0.01/dist:.0f} USDT)")
+    if last_close is None:
+        print("немає даних Kraken — повідомлення не надіслано")
+        return
+    if not entries and not skipped and not exits:
+        msg = f"☀️ Тренд-система {now:%d.%m}: нових входів немає"
+        if not bot.tg(msg, silent=True):
+            print(msg)
+        return
+    lines = [f"☀️ <b>ВХОДИ НА СЬОГОДНІ</b> — {now:%d.%m %H:%M}", "━━━━━━━━━━━━━━━━"]
+    lines += entries + skipped
+    if exits:
+        lines += ["", *exits]
+    if entries:
+        lines += ["", "<i>Входити в кожен сигнал, не вибирати: ~65% угод закриваються малим мінусом на стопі, "
+                      "заробляють рідкі великі тренди (NEAR +119% з 04.09). Ізольована маржа, стоп не рухати вниз.</i>"]
+    lines.append(f"<i>Денна свічка закрита {last_close:%d.%m}. Не фінансова порада.</i>")
+    msg = "\n".join(lines)
+    if not bot.tg(msg):
+        print(f"TG не надіслано\n{msg}")
 
 
 def main():
@@ -153,11 +210,11 @@ def main():
         for o in open_all:
             lines.append(f"· {o['sym'].split('/')[0]} відкрита з {o['t0']:%d.%m} за {fmt(o['entry'])}: зараз {o['R_now']:+.2f}R")
         lines.append("<i>1R = втрата на стопі; при ризику 2% депо: +1R = +2% депо</i>")
-    lines.append(f"\n<i>Денна свічка закрита {last_close:%d.%m}. Стоп — ордером на біржі. Не фінансова порада.</i>")
+    lines.append(f"\n<i>Денна свічка закрита {last_close:%d.%m}. Входи — у ранковому повідомленні ~09:00. Не фінансова порада.</i>")
     msg = "\n".join(lines)
-    if not bot.tg(msg):
+    if not bot.tg(msg, silent=True):                         # ніч — без звуку; входи приходять вранці окремо
         print(f"TG не надіслано\n{msg}")
 
 
 if __name__ == "__main__":
-    main()
+    morning() if "morning" in sys.argv[1:] else main()

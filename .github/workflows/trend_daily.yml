@@ -4,7 +4,15 @@ on:
   schedule:
     # Раз на добу після денного закриття Kraken (00:00 UTC): 03:05 Київ літом, 02:05 взимку
     - cron: '5 0 * * *'
+    # Ранковий алерт «ВХОДИ НА СЬОГОДНІ» (гучно): 09:00 Київ літом, 08:00 взимку
+    - cron: '0 6 * * *'
   workflow_dispatch:  # ручний запуск для тесту
+    inputs:
+      mode:
+        description: 'night = нічний звіт, morning = ранкові входи'
+        default: 'night'
+        type: choice
+        options: [night, morning]
 
 jobs:
   trend:
@@ -29,4 +37,4 @@ jobs:
         env:
           TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python trend_daily.py
+        run: python trend_daily.py ${{ (github.event.schedule == '0 6 * * *' || inputs.mode == 'morning') && 'morning' || '' }}
